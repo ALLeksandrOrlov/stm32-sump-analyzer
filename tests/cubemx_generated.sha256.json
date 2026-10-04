@@ -1,0 +1,17 @@
+{
+  "Inc/main.h": "ae96945dd8db5a5d005c577f6a1246a862691f27f1868b631b6e62bda2b93202",
+  "Inc/stm32f4xx_hal_conf.h": "0f520ffd46ddd76eede8ecf3d3779eadde8eacd386a2ae49210e4321bd5c67f0",
+  "Inc/stm32f4xx_it.h": "c798285cccaeac82bc88de5c658d28b862923565adfe58484d84497ae628573a",
+  "Inc/usb_device.h": "25c215eb198f7d04e08444ab9fb73b6bfce9c7f919452875b0b87182659089d6",
+  "Inc/usbd_cdc_if.h": "87f9139a1d658e96bf0ca1b1121d879b0aa7e06b005de1d202d7d15297de936d",
+  "Inc/usbd_conf.h": "34fbb3ffee1496b6c49c9957e4e05d683cc51196a3a09297b409402a1c9c9a89",
+  "Inc/usbd_desc.h": "b66d162c60bdcd33e95456d375d23442cebecb498627f5f846253ae609c1d193",
+  "Src/main.c": "c36e5371edac7ca672c4069288332f76cd41026d9c966aae36391171b26f9b2c",
+  "Src/stm32f4xx_hal_msp.c": "b6c0af0c163621f790591fc18e28ccd1f57e6c9f22243ca3dad74c2a0a023aee",
+  "Src/stm32f4xx_it.c": "c5d7998a746077fda46e070a36f33376c850456dd84de5432174f8b09cc4d3d4",
+  "Src/system_stm32f4xx.c": "26700e95b57ce0476acf7e35dcab0eabc4ffa5891d06fcd67912796917a89191",
+  "Src/usb_device.c": "ded03e269ffb4852f938ba82d5bd0768cc4d9336cf9c870f42687bb54bf5770c",
+  "Src/usbd_cdc_if.c": "60ce55193a28bd56fc82a15cabf00244a4227ea8cc768c7da5b1b50fefb0689b",
+  "Src/usbd_conf.c": "edf5517fdf92c59d747e5224cfc239988c6b452ba15dfc74f8c9d858eddec730",
+  "Src/usbd_desc.c": "19767924bcae7e8a752ae57be71662ebfc57faacd23f548150ce9e1e14f9270f"
+}

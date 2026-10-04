@@ -1,0 +1,6 @@
+.git
+out
+build
+pic
+.DS_Store
+**/__pycache__
