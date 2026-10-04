@@ -24,7 +24,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "analyzer_board.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -52,8 +52,6 @@
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 /* USER CODE BEGIN PFP */
-
-void Init(void);
 
 /* USER CODE END PFP */
 
@@ -86,21 +84,21 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  Init();
-  HAL_Delay(100);
+  analyzer_board_init();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-
+  HAL_NVIC_SetPriority(OTG_FS_IRQn, 3, 0);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    analyzer_board_poll();
     /* USER CODE END WHILE */
     __WFI();
     /* USER CODE BEGIN 3 */
@@ -165,31 +163,6 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-
-void Init(void)
-{
-  //PriorityGroupConfig(NVIC_PRIORITYGROUP_4);
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-  GPIO_InitTypeDef gpioInit = {0};
-  gpioInit.Pin = 0xffff;
-	gpioInit.Mode = GPIO_MODE_INPUT;
-	gpioInit.Pull = GPIO_PULLDOWN;
-	gpioInit.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(SAMPLING_PORT, &gpioInit);
-
-  #ifdef SAMPLING_MANUAL
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  GPIO_InitTypeDef gpioInit_b = {0};
-	gpioInit_b.Pin = 0x0001;
-	gpioInit_b.Mode = GPIO_MODE_AF_PP;
-	gpioInit_b.Pull = GPIO_PULLDOWN;
-	gpioInit_b.Speed = GPIO_SPEED_FREQ_HIGH;
-  gpioInit_b.Alternate = GPIO_AF3_TIM8;
-	HAL_GPIO_Init(GPIOA, &gpioInit_b);
-
-	//GPIO_PinAFConfig(GPIOA, GPIO_PinSource0 , GPIO_AF_TIM8);
-#endif
-}
 
 /* USER CODE END 4 */
 
