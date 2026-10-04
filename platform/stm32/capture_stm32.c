@@ -3,7 +3,7 @@
 #include <string.h>
 
 /* This adapter exclusively owns PD0..7, EXTI0..7, TIM1, TIM8, DMA2 stream 5. */
-static uint8_t samples[CAPTURE_CAPACITY] __attribute__((aligned(4)));
+static uint8_t samples[CAPTURE_BUFFER_SAMPLES] __attribute__((aligned(4)));
 static volatile capture_hw_event_t event;
 static volatile bool active, armed;
 static uint32_t count;
@@ -155,7 +155,7 @@ void capture_stm32_init(void)
     HAL_NVIC_EnableIRQ(DMA2_Stream5_IRQn);
 }
 
-uint32_t capture_stm32_timer_clock(void)
+uint32_t capture_stm32_timer_clock_hz(void)
 {
     uint32_t clock = HAL_RCC_GetPCLK2Freq();
     return (RCC->CFGR & RCC_CFGR_PPRE2) ? 2u * clock : clock;
@@ -187,14 +187,14 @@ static void complete(void)
     event = stopped ? CAPTURE_HW_COMPLETE : CAPTURE_HW_ERROR;
 }
 
-void capture_stm32_timer_irq(void)
+void capture_stm32_tim8_update_irq(void)
 {
     if (!(TIM8->SR & TIM_SR_UIF)) return;
     TIM8->SR = 0;
     if (active) complete();
 }
 
-void capture_stm32_dma_irq(void)
+void capture_stm32_dma2_stream5_irq(void)
 {
     uint32_t status = DMA2->HISR;
     DMA2->HIFCR = DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5 | DMA_HIFCR_CTEIF5 |

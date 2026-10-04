@@ -49,7 +49,7 @@ static const uint8_t *buffer(void *ctx, uint32_t *next)
     return NULL;
 }
 void capture_stm32_init(void) {}
-uint32_t capture_stm32_timer_clock(void) { return 168000000; }
+uint32_t capture_stm32_timer_clock_hz(void) { return 168000000; }
 capture_driver_t capture_stm32_driver(void)
 {
     return (capture_driver_t){NULL, start, stop, poll, buffer};

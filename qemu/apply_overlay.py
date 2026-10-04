@@ -10,10 +10,10 @@ args = parser.parse_args()
 root = args.source
 if (root / 'VERSION').read_text().strip() != '9.2.4':
     raise SystemExit('This overlay is tested with QEMU 9.2.4 only')
-shutil.copyfile(Path(__file__).parent / 'overlay/stm32f407-analyzer.c',
-                root / 'hw/arm/stm32f407-analyzer.c')
+shutil.copyfile(Path(__file__).parent / 'overlay/stm32f407-sump-analyzer.c',
+                root / 'hw/arm/stm32f407-sump-analyzer.c')
 p = root / 'hw/arm/meson.build'
-line = "arm_ss.add(when: 'CONFIG_STM32F405_SOC', if_true: files('stm32f407-analyzer.c'))\n"
+line = "arm_ss.add(when: 'CONFIG_STM32F405_SOC', if_true: files('stm32f407-sump-analyzer.c'))\n"
 text = p.read_text()
 if line not in text:
     p.write_text(text.replace("hw_arch += {'arm': arm_ss}", line + "\nhw_arch += {'arm': arm_ss}"))

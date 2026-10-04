@@ -1,6 +1,6 @@
 .git
 out
 build
-pic
+docs/images
 .DS_Store
 **/__pycache__

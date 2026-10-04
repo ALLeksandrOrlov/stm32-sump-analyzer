@@ -5,9 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CAPTURE_CAPACITY (28u * 1024u)
-#define CAPTURE_MAX_RATE 20000000u
-#define CAPTURE_SUMP_CLOCK 100000000u
+#define CAPTURE_BUFFER_SAMPLES (28u * 1024u)
+#define CAPTURE_MAX_SAMPLE_RATE_HZ 20000000u
+#define CAPTURE_SUMP_CLOCK_HZ 100000000u
 
 typedef struct {
     uint32_t divider;
@@ -45,14 +45,14 @@ typedef struct {
     capture_state_t state;
     capture_plan_t plan;
     capture_driver_t driver;
-    uint32_t timer_clock;
+    uint32_t timer_clock_hz;
 } capture_controller_t;
 
 void capture_config_default(capture_config_t *config);
-bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock,
+bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock_hz,
                        capture_plan_t *plan);
 void capture_controller_init(capture_controller_t *controller,
-                             capture_driver_t driver, uint32_t timer_clock);
+                             capture_driver_t driver, uint32_t timer_clock_hz);
 /* ECA dispatcher: events act only when their state/configuration guards hold. */
 bool capture_dispatch(capture_controller_t *controller, capture_event_t event,
                       const capture_config_t *config);

@@ -1,6 +1,6 @@
 # Повторная генерация CubeMX
 
-В `meas_complex.ioc` уже включено `ProjectManager.KeepUserCode=true`.
+В `stm32_sump_analyzer.ioc` уже включено `ProjectManager.KeepUserCode=true`.
 Все новые подключения в `Src/` и `Inc/` находятся в `USER CODE BEGIN/END`.
 
 - `main.c`: include, инициализация в SysInit, приоритет USB в секции 2,
@@ -8,6 +8,8 @@
 - `stm32f4xx_it.c`: include и переходники обработчиков в секции 1.
 - `usbd_cdc_if.c`: include, callbacks 3/4/6/7, вспомогательные функции в
   PRIVATE_FUNCTIONS_IMPLEMENTATION.
+- `usbd_desc.c`: общий заголовок идентификации в INCLUDE; переопределения
+  строк USB в PRIVATE_DEFINES. Имя устройства сохраняется после генерации.
 - Заголовки: declarations/includes внутри соответствующих пользовательских секций.
 
 В исходном `usbd_cdc_if.c` был повреждён комментарий `USER CODE END INCLUDE`.

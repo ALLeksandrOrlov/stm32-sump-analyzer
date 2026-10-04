@@ -1,7 +1,7 @@
 # Hand-maintained entry point. GNU make prefers this to the CubeMX Makefile.
 .DEFAULT_GOAL := all
 BUILD_DIR ?= out
-TARGET := meas_complex
+TARGET := stm32_sump_analyzer
 CROSS_COMPILE ?= arm-none-eabi-
 ARM_CC := $(CROSS_COMPILE)gcc
 ARM_OBJCOPY := $(CROSS_COMPILE)objcopy
@@ -86,7 +86,7 @@ $(BUILD_DIR)/qemu/test_capture_stm32.elf: $(QEMU_STM32_SOURCES) $(wildcard core/
 .PHONY: qemu-stm32-test
 qemu-stm32-test: $(BUILD_DIR)/qemu/test_capture_stm32.elf
 	$(PYTHON) scripts/run_qemu.py --qemu $(QEMU) --elf $< \
-	 --machine stm32f407-analyzer --success 'ALL STM32 CAPTURE TESTS PASSED'
+	 --machine stm32f407-sump-analyzer --success 'ALL STM32 CAPTURE TESTS PASSED'
 
 BOARD_TEST_SOURCES := tests/test_board.c platform/stm32/analyzer_board.c $(CORE)
 $(BUILD_DIR)/tests/test_board: $(BOARD_TEST_SOURCES) $(wildcard core/*.h) $(wildcard platform/stm32/*.h) tests/stubs/usbd_cdc_if.h GNUmakefile

@@ -41,13 +41,13 @@ def package(output, revision, source_ref, dirty):
     dist = output / "dist"
     dist.mkdir()
     for suffix in ("elf", "hex", "bin", "map"):
-        name = f"meas_complex.{suffix}"
+        name = f"stm32_sump_analyzer.{suffix}"
         shutil.copyfile(output / "work/firmware" / name, dist / name)
     info = {
         "source_revision": revision, "source_ref": source_ref,
         "source_dirty": dirty,
         "compiler": version(["arm-none-eabi-gcc", "--version"]),
-        "qemu": version(["qemu-system-arm-analyzer", "--version"]),
+        "qemu": version(["qemu-system-arm-sump-analyzer", "--version"]),
         "tests": "passed",
     }
     (dist / "build-info.json").write_text(json.dumps(info, indent=2) + "\n")
@@ -76,7 +76,7 @@ def main():
         ("native", ["make", "test"], 120),
         ("sanitizers", ["make", "test-sanitize"], 120),
         ("qemu-core", ["make", "qemu-test"], 120),
-        ("qemu-stm32", ["make", "qemu-stm32-test", "QEMU=qemu-system-arm-analyzer"], 120),
+        ("qemu-stm32", ["make", "qemu-stm32-test", "QEMU=qemu-system-arm-sump-analyzer"], 120),
         ("firmware", ["make", "-j2", "firmware"], 300),
     ]
     results = []

@@ -2,7 +2,7 @@
 # One local command mirrors the GitHub Actions container run.
 set -eu
 cd "$(dirname "$0")/.."
-image=${CI_IMAGE:-sump-analyzer-ci:local}
+image=${CI_IMAGE:-stm32-sump-analyzer-ci:local}
 docker buildx build --target ci --load -t "$image" .
 revision=$(git rev-parse HEAD 2>/dev/null || printf unknown)
 ref=$(git describe --tags --always 2>/dev/null || printf local)

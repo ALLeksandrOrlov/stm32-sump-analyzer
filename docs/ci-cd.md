@@ -6,7 +6,7 @@
 make docker-build
 ```
 
-Команда собирает образ `sump-analyzer-ci:local` (Dockerfile target `ci`) и запускает
+Команда собирает образ `stm32-sump-analyzer-ci:local` (Dockerfile target `ci`) и запускает
 `scripts/ci.py` в отдельном контейнере с исходниками проекта. Компилятор ARM,
 санитайзеры, обычный QEMU и QEMU с моделью анализатора находятся внутри образа.
 Ничего из этого не требуется устанавливать на хост. `make docker-test` — псевдоним
@@ -35,10 +35,10 @@ QEMU использует программную эмуляцию TCG; KVM, вл
 ```text
 out/ci/
 ├── dist/
-│   ├── meas_complex.bin
-│   ├── meas_complex.hex
-│   ├── meas_complex.elf
-│   ├── meas_complex.map
+│   ├── stm32_sump_analyzer.bin
+│   ├── stm32_sump_analyzer.hex
+│   ├── stm32_sump_analyzer.elf
+│   ├── stm32_sump_analyzer.map
 │   ├── build-info.json
 │   └── SHA256SUMS
 ├── reports/
@@ -97,17 +97,17 @@ Dependabot еженедельно предлагает обновления Acti
 
 ```sh
 # Только собрать образ инструментов
-docker buildx build --target ci --load -t sump-analyzer-ci:local .
+docker buildx build --target ci --load -t stm32-sump-analyzer-ci:local .
 
 # Повторить весь сценарий без пересборки образа
 docker run --rm --network=none --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$PWD,dst=/project" \
-  sump-analyzer-ci:local
+  stm32-sump-analyzer-ci:local
 
 # Запустить только аппаратные тесты QEMU для отладки
 docker run --rm --network=none --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$PWD,dst=/project" \
-  sump-analyzer-ci:local make qemu-stm32-test QEMU=qemu-system-arm-analyzer
+  stm32-sump-analyzer-ci:local make qemu-stm32-test QEMU=qemu-system-arm-sump-analyzer
 ```
 
 При прямом `docker run` без переменных `SOURCE_*` происхождение сборки в метаданных

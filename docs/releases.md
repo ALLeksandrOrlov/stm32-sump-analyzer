@@ -5,7 +5,8 @@ CD здесь — публикация проверенных файлов пр�
 
 ## Подготовка
 
-1. Изменить исходники и обновить раздел Unreleased в `CHANGELOG.md`.
+1. Изменить исходники, обновить раздел Unreleased в `CHANGELOG.md`
+   и `ANALYZER_FIRMWARE_VERSION` в `core/analyzer_identity.h`.
 2. Запустить `make docker-build`, проверить `out/ci/reports/summary.md`.
 3. Для версии, предназначенной пользователям платы, выполнить
    [аппаратную проверку](hardware-validation.md). QEMU её не заменяет.

@@ -18,7 +18,7 @@
 #include "migration/vmstate.h"
 #include "exec/address-spaces.h"
 
-#define TYPE_ANALYZER "stm32f407-analyzer-peripherals"
+#define TYPE_ANALYZER "stm32f407-sump-analyzer-peripherals"
 OBJECT_DECLARE_SIMPLE_TYPE(AnalyzerState, ANALYZER)
 
 enum { GPIO, TIM1, TIM8, DMA2, FIXTURE, REGION_COUNT };
@@ -306,4 +306,4 @@ static void analyzer_machine_class_init(MachineClass *mc)
     mc->desc = "STM32F407 analyzer capture test machine (GPIO/DMA/TIM1/TIM8 subset)";
     mc->init = analyzer_machine_init;
 }
-DEFINE_MACHINE("stm32f407-analyzer", analyzer_machine_class_init)
+DEFINE_MACHINE("stm32f407-sump-analyzer", analyzer_machine_class_init)

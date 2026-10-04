@@ -1,5 +1,5 @@
-/build/*
-!/build/*.bin
+/build/
 /out/
 __pycache__/
 .DS_Store
+/Makefile

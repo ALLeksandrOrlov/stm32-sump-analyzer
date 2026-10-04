@@ -6,18 +6,20 @@ void capture_config_default(capture_config_t *config)
     *config = (capture_config_t){99, 1024, 1024, 0, 0, 0x38};
 }
 
-bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock,
+bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock_hz,
                        capture_plan_t *plan)
 {
-    /* Eight probes, internal clock, no RLE/DDR/filter. Other group-disable bits
-     * are harmless because the metadata advertises only one group. */
-    if (!timer_clock || !config->samples || config->samples > CAPTURE_CAPACITY ||
+    /* Eight probes, internal clock, no RLE/DDR. libsigrok's OLS driver always
+     * sets its FPGA noise-filter flag (bit 1) below 100 MHz; accept that hint
+     * without changing raw GPIO samples. Other group-disable bits are harmless
+     * because the metadata advertises only one group. */
+    if (!timer_clock_hz || !config->samples || config->samples > CAPTURE_BUFFER_SAMPLES ||
         !config->post_trigger || config->post_trigger > config->samples ||
-        (config->flags & (uint16_t)~0x38u)) return false;
+        (config->flags & (uint16_t)~0x3au)) return false;
 
-    uint64_t ticks = ((uint64_t)timer_clock * ((config->divider & 0xffffffu) + 1u)
-                      + CAPTURE_SUMP_CLOCK - 1u) / CAPTURE_SUMP_CLOCK;
-    uint32_t minimum = (timer_clock + CAPTURE_MAX_RATE - 1u) / CAPTURE_MAX_RATE;
+    uint64_t ticks = ((uint64_t)timer_clock_hz * ((config->divider & 0xffffffu) + 1u)
+                      + CAPTURE_SUMP_CLOCK_HZ - 1u) / CAPTURE_SUMP_CLOCK_HZ;
+    uint32_t minimum = (timer_clock_hz + CAPTURE_MAX_SAMPLE_RATE_HZ - 1u) / CAPTURE_MAX_SAMPLE_RATE_HZ;
     if (ticks < minimum) ticks = minimum;
     if (!ticks) ticks = 1;
     uint64_t prescaler = (ticks + 65535u) / 65536u;
@@ -30,11 +32,11 @@ bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock,
 }
 
 void capture_controller_init(capture_controller_t *controller,
-                             capture_driver_t driver, uint32_t timer_clock)
+                             capture_driver_t driver, uint32_t timer_clock_hz)
 {
     memset(controller, 0, sizeof(*controller));
     controller->driver = driver;
-    controller->timer_clock = timer_clock;
+    controller->timer_clock_hz = timer_clock_hz;
 }
 
 bool capture_dispatch(capture_controller_t *c, capture_event_t event,
@@ -47,7 +49,7 @@ bool capture_dispatch(capture_controller_t *c, capture_event_t event,
         return true;
     case CAPTURE_EVENT_RUN:
         if (c->state != CAPTURE_IDLE) return false;
-        if (!config || !capture_make_plan(config, c->timer_clock, &c->plan) ||
+        if (!config || !capture_make_plan(config, c->timer_clock_hz, &c->plan) ||
             !c->driver.start(c->driver.context, &c->plan)) {
             c->driver.stop(c->driver.context);
             c->state = CAPTURE_ERROR;

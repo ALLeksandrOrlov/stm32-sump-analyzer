@@ -26,7 +26,7 @@ RUN /opt/qemu-src/configure --target-list=arm-softmmu --disable-docs \
 # Reusable CI image: project sources are mounted at runtime, so test runs never
 # disappear behind a Docker RUN cache hit. QEMU is cached independently.
 FROM toolchain AS ci
-COPY --from=qemu-builder /opt/qemu-build/qemu-system-arm /usr/local/bin/qemu-system-arm-analyzer
+COPY --from=qemu-builder /opt/qemu-build/qemu-system-arm /usr/local/bin/qemu-system-arm-sump-analyzer
 WORKDIR /project
 CMD ["python3", "scripts/ci.py"]
 

@@ -35,7 +35,7 @@ Docker Desktop не устанавливался. В VM доступен тол�
 ## Ошибка сборки образа
 
 ```sh
-docker buildx build --progress=plain --target ci --load -t sump-analyzer-ci:local .
+docker buildx build --progress=plain --target ci --load -t stm32-sump-analyzer-ci:local .
 ```
 
 Смотрите первую ошибку, а не только финальное `failed to solve`.
@@ -57,8 +57,8 @@ docker buildx build --progress=plain --target ci --load -t sump-analyzer-ci:loca
 - `qemu-stm32`: периферия, DMA, EXTI, IRQ или модель анализатора.
 - `firmware`: компилятор, linker, память или интеграция STM32/USB.
 
-`unsupported machine type stm32f407-analyzer` означает запуск обычного QEMU.
-Используйте контейнер либо `QEMU=qemu-system-arm-analyzer` внутри него.
+`unsupported machine type stm32f407-sump-analyzer` означает запуск обычного QEMU.
+Используйте контейнер либо `QEMU=qemu-system-arm-sump-analyzer` внутри него.
 `QEMU failed: ... timed out` — тест завис или слишком долго выполняется;
 проверьте, достигается ли Reset_Handler и не попал ли процессор в fault handler.
 

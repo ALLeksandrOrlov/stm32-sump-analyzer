@@ -9,7 +9,7 @@
 
 #define FIXTURE ((volatile uint32_t *)0x60000000u)
 static analyzer_app_t app;
-static uint8_t wire[CAPTURE_CAPACITY];
+static uint8_t wire[CAPTURE_BUFFER_SAMPLES];
 static size_t wire_length;
 uint32_t SystemCoreClock = 168000000;
 /* The model has a fixed timer clock. PLL/RCC startup is outside these tests. */
@@ -21,8 +21,8 @@ void EXTI2_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI3_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
-void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_timer_irq(); }
-void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma_irq(); }
+void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_tim8_update_irq(); }
+void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma2_stream5_irq(); }
 static bool ready(void *ctx) { (void)ctx; return true; }
 static bool send_bytes(void *ctx, const uint8_t *data, size_t size)
 {
@@ -134,11 +134,11 @@ int main(void)
     capture_stm32_init();
     analyzer_app_init(&app, capture_stm32_driver(),
                       (analyzer_transport_t){NULL, ready, send_bytes},
-                      capture_stm32_timer_clock());
+                      capture_stm32_timer_clock_hz());
     test_gpio();
     test_untriggered(4);
     test_untriggered(68);
-    test_untriggered(CAPTURE_CAPACITY);
+    test_untriggered(CAPTURE_BUFFER_SAMPLES);
     test_edge(true);
     test_edge(false);
     test_reset_and_error();

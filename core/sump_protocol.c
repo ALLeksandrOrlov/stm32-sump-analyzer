@@ -1,4 +1,5 @@
 #include "sump_protocol.h"
+#include "analyzer_identity.h"
 #include <string.h>
 
 void sump_parser_reset(sump_parser_t *parser)
@@ -43,7 +44,8 @@ static void put_be32(uint8_t *output, uint32_t value)
 size_t sump_metadata(uint8_t *output, size_t capacity, uint32_t memory, uint32_t rate)
 {
     static const uint8_t strings[] =
-        "\x01" "Measuring Complex\0" "\x02" "NoFPGA\0" "\x03" "2.0\0";
+        "\x01" ANALYZER_DEVICE_NAME "\0" "\x02" "NoFPGA\0"
+        "\x03" ANALYZER_FIRMWARE_VERSION "\0";
     const size_t prefix = sizeof(strings) - 1;
     const size_t length = prefix + 15;
     if (capacity < length) return 0;

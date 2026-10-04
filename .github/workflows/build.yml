@@ -30,7 +30,7 @@ jobs:
           context: .
           target: ci
           load: true
-          tags: sump-analyzer-ci:run
+          tags: stm32-sump-analyzer-ci:run
           cache-from: type=gha,scope=firmware-ci
           cache-to: type=gha,mode=max,scope=firmware-ci
       - name: Run all checks and package verified firmware
@@ -41,7 +41,7 @@ jobs:
           docker run --rm --network=none --user "$(id -u):$(id -g)" \
             --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/project" \
             -e SOURCE_REVISION -e SOURCE_REF -e SOURCE_DIRTY=false \
-            sump-analyzer-ci:run
+            stm32-sump-analyzer-ci:run
       - name: Add stage results to the job summary
         if: always()
         run: |
@@ -100,5 +100,5 @@ jobs:
           if [[ "$RELEASE_TAG" == *-* ]]; then options+=(--prerelease); fi
           gh release create "$RELEASE_TAG" --verify-tag --generate-notes \
             --title "$RELEASE_TAG" "${options[@]}" \
-            meas_complex.elf meas_complex.hex meas_complex.bin meas_complex.map \
+            stm32_sump_analyzer.elf stm32_sump_analyzer.hex stm32_sump_analyzer.bin stm32_sump_analyzer.map \
             build-info.json SHA256SUMS

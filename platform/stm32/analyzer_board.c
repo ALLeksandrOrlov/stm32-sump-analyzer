@@ -33,7 +33,7 @@ void analyzer_board_init(void)
     capture_stm32_init();
     analyzer_app_init(&app, capture_stm32_driver(),
                       (analyzer_transport_t){NULL, ready, write_bytes},
-                      capture_stm32_timer_clock());
+                      capture_stm32_timer_clock_hz());
 }
 
 void analyzer_board_usb_receive(const uint8_t *bytes, uint32_t length)

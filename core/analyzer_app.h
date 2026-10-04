@@ -20,13 +20,13 @@ typedef struct {
     uint8_t reply[64];
     size_t reply_length;
     uint8_t tx[64];
-    uint32_t sent;
-    bool in_flight;
-    bool capture_transfer;
+    uint32_t samples_sent;
+    bool tx_in_flight;
+    bool tx_contains_samples;
 } analyzer_app_t;
 
 void analyzer_app_init(analyzer_app_t *app, capture_driver_t driver,
-                       analyzer_transport_t transport, uint32_t timer_clock);
+                       analyzer_transport_t transport, uint32_t timer_clock_hz);
 void analyzer_app_reset(analyzer_app_t *app);
 /* Returns false without consuming the byte when a reply must be drained first.
  * All app APIs are foreground-only; interrupt adapters must buffer input. */

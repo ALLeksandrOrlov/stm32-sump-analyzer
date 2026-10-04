@@ -22,7 +22,7 @@ class PipelineTests(unittest.TestCase):
             root = Path(temp).resolve()
             stale = root / 'out/ci/dist'
             stale.mkdir(parents=True)
-            (stale / 'meas_complex.bin').write_bytes(b'old-success')
+            (stale / 'stm32_sump_analyzer.bin').write_bytes(b'old-success')
 
             def stage(name, command, reports, timeout):
                 (reports / f'{name}.log').write_text('simulated stage output')
@@ -47,7 +47,7 @@ class PipelineTests(unittest.TestCase):
             firmware = output / 'work/firmware'
             firmware.mkdir(parents=True)
             for suffix in ('bin', 'hex', 'elf', 'map'):
-                (firmware / f'meas_complex.{suffix}').write_bytes(suffix.encode())
+                (firmware / f'stm32_sump_analyzer.{suffix}').write_bytes(suffix.encode())
             with mock.patch.object(ci, 'version', return_value='test version'):
                 ci.package(output, 'abc123', 'refs/tags/v0.1.0', 'false')
             dist = output / 'dist'

@@ -4,7 +4,7 @@
 #include <string.h>
 
 typedef struct {
-    uint8_t data[CAPTURE_CAPACITY];
+    uint8_t data[CAPTURE_BUFFER_SAMPLES];
     uint32_t next;
     unsigned starts, stops;
     bool start_ok, busy, reject;
@@ -12,7 +12,7 @@ typedef struct {
     capture_plan_t plan;
     const uint8_t *borrowed;
     size_t borrowed_length;
-    uint8_t wire[CAPTURE_CAPACITY + 256];
+    uint8_t wire[CAPTURE_BUFFER_SAMPLES + 256];
     size_t wire_length;
 } fake_t;
 static fake_t fake;
@@ -122,10 +122,14 @@ static void test_metadata(void)
 {
     uint8_t data[80];
     memset(data, 0xa5, sizeof(data));
-    assert(sump_metadata(data, 1, CAPTURE_CAPACITY, CAPTURE_MAX_RATE) == 0);
+    assert(sump_metadata(data, 1, CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ) == 0);
     assert(data[0] == 0xa5);
-    size_t length = sump_metadata(data, sizeof(data), CAPTURE_CAPACITY, CAPTURE_MAX_RATE);
+    size_t length = sump_metadata(data, sizeof(data), CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ);
     assert(length < sizeof(data) && data[length] == 0xa5);
+    /* Metadata must fit the application's single control-reply packet. */
+    assert(length <= sizeof(app.reply));
+    assert(data[0] == 0x01);
+    assert(strcmp((const char *)data + 1, "STM32 SUMP Analyzer") == 0);
     size_t at = 0;
     unsigned strings = 0;
     while (data[at] >= 1 && data[at] <= 3) {
@@ -153,7 +157,7 @@ static void test_plans(void)
     assert(capture_make_plan(&config, 168000000, &plan));
     uint64_t ticks = ((uint64_t)plan.prescaler + 1) * (plan.reload + 1u);
     assert(ticks >= ((uint64_t)168000000 * 0x1000000u + 99999999) / 100000000);
-    config.samples = CAPTURE_CAPACITY;
+    config.samples = CAPTURE_BUFFER_SAMPLES;
     assert(capture_make_plan(&config, 168000000, &plan));
     config.samples++;
     assert(!capture_make_plan(&config, 168000000, &plan));
@@ -165,7 +169,9 @@ static void test_plans(void)
     config.post_trigger = 0;
     assert(!capture_make_plan(&config, 168000000, &plan));
     capture_config_default(&config);
-    const uint16_t unsupported[] = {1, 2, 4, 0x40, 0x80, 0x100, 0x8000};
+    config.flags = 0x3a; /* OLS defaults: FPGA filter hint + unused groups off. */
+    assert(capture_make_plan(&config, 168000000, &plan));
+    const uint16_t unsupported[] = {1, 4, 0x40, 0x80, 0x100, 0x8000};
     for (size_t i = 0; i < sizeof(unsupported)/sizeof(unsupported[0]); ++i) {
         config.flags = unsupported[i];
         assert(!capture_make_plan(&config, 168000000, &plan));
@@ -209,7 +215,7 @@ static void test_replies(void)
     assert(!analyzer_app_receive(&app, SUMP_META));
     fake.reject = true;
     analyzer_app_poll(&app);
-    assert(app.reply_length == 4 && !app.in_flight);
+    assert(app.reply_length == 4 && !app.tx_in_flight);
     fake.reject = false;
     analyzer_app_poll(&app);
     command(SUMP_META, 0);
@@ -218,14 +224,14 @@ static void test_replies(void)
     assert(fake.wire_length == 4 && memcmp(fake.wire, "1ALS", 4) == 0);
     drain();
     uint8_t expected[64];
-    size_t length = sump_metadata(expected, sizeof(expected), CAPTURE_CAPACITY, CAPTURE_MAX_RATE);
+    size_t length = sump_metadata(expected, sizeof(expected), CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ);
     assert(fake.wire_length == 4 + length);
     assert(memcmp(fake.wire + 4, expected, length) == 0);
 }
 static void test_capture_order(void)
 {
     /* Includes DMA wrap, exact end, zero tail, partial packets and maximum RAM. */
-    const uint32_t sizes[] = {4, 64, 68, CAPTURE_CAPACITY};
+    const uint32_t sizes[] = {4, 64, 68, CAPTURE_BUFFER_SAMPLES};
     for (size_t s = 0; s < sizeof(sizes)/sizeof(sizes[0]); ++s) {
         uint32_t count = sizes[s];
         const uint32_t tails[] = {0, 1, count - 1, count};
@@ -239,7 +245,7 @@ static void test_capture_order(void)
             fake.event = CAPTURE_HW_COMPLETE;
             fake.reject = true;
             analyzer_app_poll(&app);
-            assert(app.sent == 0);
+            assert(app.samples_sent == 0);
             fake.reject = false;
             drain();
             assert(fake.wire_length == count && app.capture.state == CAPTURE_IDLE);

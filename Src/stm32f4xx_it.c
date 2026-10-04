@@ -219,7 +219,7 @@ void EXTI2_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI3_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
-void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_timer_irq(); }
-void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma_irq(); }
+void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_tim8_update_irq(); }
+void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma2_stream5_irq(); }
 /* USER CODE END 1 */
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

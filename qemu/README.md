@@ -1,6 +1,6 @@
 # Расширение QEMU для STM32F407-анализатора
 
-`overlay/stm32f407-analyzer.c` добавляет отдельную машину `stm32f407-analyzer`
+`overlay/stm32f407-sump-analyzer.c` добавляет отдельную машину `stm32f407-sump-analyzer`
 на базе STM32F405/Cortex-M4. Это целевая модель периферии, которую использует
 прошивка, а не полная эмуляция STM32F407. Обычная `netduinoplus2` сохраняется.
 
