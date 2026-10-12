@@ -7,6 +7,9 @@ ARM_CC := $(CROSS_COMPILE)gcc
 ARM_OBJCOPY := $(CROSS_COMPILE)objcopy
 ARM_SIZE := $(CROSS_COMPILE)size
 HOST_CC ?= cc
+COVERAGE_CC ?= gcc
+GCOV ?= gcov
+GCOVR ?= gcovr
 PYTHON ?= python3
 QEMU ?= qemu-system-arm
 CORE := core/sump_protocol.c core/capture.c core/analyzer_app.c
@@ -101,3 +104,28 @@ test-board-sanitize:
 	$(HOST_CC) $(HOST_FLAGS) $(SANITIZERS) -Itests/stubs -Iplatform/stm32 $(BOARD_TEST_SOURCES) -o $(BUILD_DIR)/tests/test_board_sanitize
 	$(BUILD_DIR)/tests/test_board_sanitize
 test-sanitize: test-board-sanitize
+
+# Linux PTY transport used by the PulseView interoperability environment.
+.PHONY: pulseview-fixture
+pulseview-fixture: $(BUILD_DIR)/pulseview/sump-fixture
+$(BUILD_DIR)/pulseview/sump-fixture: tools/pulseview/sump_fixture.c $(CORE) $(wildcard core/*.h) GNUmakefile
+	@mkdir -p $(@D)
+	$(HOST_CC) $(HOST_FLAGS) tools/pulseview/sump_fixture.c $(CORE) -lutil -o $@
+
+# Measure portable application logic and the USB adapter. The register driver
+# is exercised on Cortex-M4 in QEMU; vendor code is outside this coverage scope.
+.PHONY: coverage
+coverage: check-cubemx
+	@mkdir -p $(BUILD_DIR)/coverage
+	rm -f $(BUILD_DIR)/coverage/*.gcda $(BUILD_DIR)/coverage/*.gcno
+	$(COVERAGE_CC) $(HOST_FLAGS) -O0 --coverage $(TEST_SOURCES) -o $(BUILD_DIR)/coverage/test_core
+	$(COVERAGE_CC) $(HOST_FLAGS) -O0 --coverage -Itests/stubs -Iplatform/stm32 \
+	 $(BOARD_TEST_SOURCES) -o $(BUILD_DIR)/coverage/test_board
+	$(BUILD_DIR)/coverage/test_core
+	$(BUILD_DIR)/coverage/test_board
+	$(GCOVR) --root . --gcov-executable '$(GCOV)' \
+	 --filter 'core/' --filter 'platform/stm32/analyzer_board.c' \
+	 --fail-under-line 95 --fail-under-branch 90 \
+	 --html-details $(BUILD_DIR)/coverage/coverage.html \
+	 --xml-pretty --xml $(BUILD_DIR)/coverage/coverage.xml \
+	 --json-summary $(BUILD_DIR)/coverage/summary.json --print-summary $(BUILD_DIR)/coverage

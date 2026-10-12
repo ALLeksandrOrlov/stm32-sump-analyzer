@@ -3,18 +3,24 @@
 #include <string.h>
 
 /* This adapter exclusively owns PD0..7, EXTI0..7, TIM1, TIM8, DMA2 stream 5. */
-static uint8_t samples[CAPTURE_BUFFER_SAMPLES] __attribute__((aligned(4)));
-static volatile capture_hw_event_t event;
-static volatile bool active, armed;
-static uint32_t count;
-static volatile uint32_t next_write;
+static uint8_t sample_buffer[CAPTURE_BUFFER_SAMPLES] __attribute__((aligned(4)));
+static volatile capture_hw_event_t pending_event;
+static volatile bool capture_active;
+static volatile bool waiting_for_trigger;
+static uint32_t sample_count;
+static volatile uint32_t next_write_index;
 static uint8_t trigger_mask;
+
+#define SAMPLE_PIN_MASK 0xffu
+#define DMA_ERROR_FLAGS (DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5)
+#define DMA_CLEAR_FLAGS (DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5 | DMA_HIFCR_CTEIF5 | \
+                         DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5)
 
 static const IRQn_Type exti_irqs[] = {
     EXTI0_IRQn, EXTI1_IRQn, EXTI2_IRQn, EXTI3_IRQn, EXTI4_IRQn, EXTI9_5_IRQn
 };
 
-static uint32_t lock(void)
+static uint32_t disable_interrupts(void)
 {
     uint32_t mask = __get_PRIMASK();
     __disable_irq();
@@ -23,9 +29,9 @@ static uint32_t lock(void)
 
 static bool stop_hardware(void)
 {
-    active = false;
-    armed = false;
-    EXTI->IMR &= ~0xffu;
+    capture_active = false;
+    waiting_for_trigger = false;
+    EXTI->IMR &= ~SAMPLE_PIN_MASK;
     TIM1->CR1 &= ~TIM_CR1_CEN;
     TIM1->DIER = 0;
     TIM8->CR1 &= ~TIM_CR1_CEN;
@@ -43,9 +49,9 @@ static bool stop_hardware(void)
 static void stop(void *context)
 {
     (void)context;
-    uint32_t mask = lock();
+    uint32_t mask = disable_interrupts();
     stop_hardware();
-    event = CAPTURE_HW_NONE;
+    pending_event = CAPTURE_HW_NONE;
     __set_PRIMASK(mask);
 }
 
@@ -54,10 +60,10 @@ static bool start(void *context, const capture_plan_t *plan)
     (void)context;
     stop(NULL);
     if (DMA2_Stream5->CR & DMA_SxCR_EN) return false;
-    memset(samples, 0, sizeof(samples));
-    uint32_t mask = lock();
-    count = plan->config.samples;
-    next_write = 0;
+    memset(sample_buffer, 0, sizeof(sample_buffer));
+    uint32_t mask = disable_interrupts();
+    sample_count = plan->config.samples;
+    next_write_index = 0;
     trigger_mask = plan->config.trigger_mask;
     TIM1->CR1 = TIM_CR1_URS;
     TIM1->CR2 = 0;
@@ -69,7 +75,8 @@ static bool start(void *context, const capture_plan_t *plan)
     TIM1->EGR = TIM_EGR_UG;
     TIM1->SR = 0;
     /* TIM1 update drives both GPIO DMA and the post-trigger sample counter.
-     * RM0090: TIM8 ITR0 is TIM1 TRGO. No second frequency calculation. */
+     * RM0090: TIM8 ITR0 is TIM1 TRGO. Both timers therefore share the same
+     * sampling period. */
     TIM1->CR2 = TIM_CR2_MMS_1;
 
     TIM8->CR1 = TIM_CR1_URS | TIM_CR1_OPM;
@@ -84,30 +91,29 @@ static bool start(void *context, const capture_plan_t *plan)
     TIM8->SMCR = TIM_SMCR_SMS; /* external clock mode 1, TS=ITR0 */
     TIM8->DIER = TIM_DIER_UIE;
 
-    DMA2->HIFCR = DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5 | DMA_HIFCR_CTEIF5 |
-                   DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5;
+    DMA2->HIFCR = DMA_CLEAR_FLAGS;
     DMA2_Stream5->PAR = (uint32_t)&GPIOD->IDR;
-    DMA2_Stream5->M0AR = (uint32_t)samples;
-    DMA2_Stream5->NDTR = count;
+    DMA2_Stream5->M0AR = (uint32_t)sample_buffer;
+    DMA2_Stream5->NDTR = sample_count;
     DMA2_Stream5->FCR = 0; /* Direct byte transfers: NDTR matches memory writes. */
     DMA2_Stream5->CR = DMA_SxCR_CHSEL_1 | DMA_SxCR_CHSEL_2 |
         DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_TEIE | DMA_SxCR_DMEIE |
         (trigger_mask ? DMA_SxCR_CIRC : DMA_SxCR_TCIE);
 
-    EXTI->RTSR = (EXTI->RTSR & ~0xffu) | (trigger_mask & plan->config.trigger_value);
-    EXTI->FTSR = (EXTI->FTSR & ~0xffu) | (trigger_mask & ~plan->config.trigger_value);
-    EXTI->PR = 0xffu;
+    EXTI->RTSR = (EXTI->RTSR & ~SAMPLE_PIN_MASK) | (trigger_mask & plan->config.trigger_value);
+    EXTI->FTSR = (EXTI->FTSR & ~SAMPLE_PIN_MASK) | (trigger_mask & ~plan->config.trigger_value);
+    EXTI->PR = SAMPLE_PIN_MASK;
     HAL_NVIC_ClearPendingIRQ(TIM8_UP_TIM13_IRQn);
     HAL_NVIC_ClearPendingIRQ(DMA2_Stream5_IRQn);
     for (size_t i = 0; i < sizeof(exti_irqs) / sizeof(exti_irqs[0]); ++i)
         HAL_NVIC_ClearPendingIRQ(exti_irqs[i]);
-    active = true;
-    armed = trigger_mask != 0;
-    event = CAPTURE_HW_NONE;
+    capture_active = true;
+    waiting_for_trigger = trigger_mask != 0;
+    pending_event = CAPTURE_HW_NONE;
     DMA2_Stream5->CR |= DMA_SxCR_EN;
     TIM1->DIER = TIM_DIER_UDE;
     TIM1->CR1 |= TIM_CR1_CEN;
-    EXTI->IMR = (EXTI->IMR & ~0xffu) | trigger_mask;
+    EXTI->IMR = (EXTI->IMR & ~SAMPLE_PIN_MASK) | trigger_mask;
     __set_PRIMASK(mask);
     return true;
 }
@@ -115,9 +121,9 @@ static bool start(void *context, const capture_plan_t *plan)
 static capture_hw_event_t poll(void *context)
 {
     (void)context;
-    uint32_t mask = lock();
-    capture_hw_event_t result = event;
-    event = CAPTURE_HW_NONE;
+    uint32_t mask = disable_interrupts();
+    capture_hw_event_t result = pending_event;
+    pending_event = CAPTURE_HW_NONE;
     __set_PRIMASK(mask);
     return result;
 }
@@ -125,8 +131,8 @@ static capture_hw_event_t poll(void *context)
 static const uint8_t *buffer(void *context, uint32_t *next)
 {
     (void)context;
-    *next = next_write;
-    return samples;
+    *next = next_write_index;
+    return sample_buffer;
 }
 
 void capture_stm32_init(void)
@@ -137,7 +143,7 @@ void capture_stm32_init(void)
     __HAL_RCC_TIM1_CLK_ENABLE();
     __HAL_RCC_TIM8_CLK_ENABLE();
     GPIO_InitTypeDef gpio = {0};
-    gpio.Pin = 0xff;
+    gpio.Pin = SAMPLE_PIN_MASK;
     gpio.Mode = GPIO_MODE_INPUT;
     gpio.Pull = GPIO_PULLDOWN;
     gpio.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
@@ -158,7 +164,9 @@ void capture_stm32_init(void)
 uint32_t capture_stm32_timer_clock_hz(void)
 {
     uint32_t clock = HAL_RCC_GetPCLK2Freq();
-    return (RCC->CFGR & RCC_CFGR_PPRE2) ? 2u * clock : clock;
+    /* PPRE2 encodings 0xx all mean divide by one. Timers double PCLK2 only
+     * for the divided 1xx encodings. */
+    return (RCC->CFGR & RCC_CFGR_PPRE2_2) ? 2u * clock : clock;
 }
 
 capture_driver_t capture_stm32_driver(void)
@@ -169,39 +177,41 @@ capture_driver_t capture_stm32_driver(void)
 void capture_stm32_exti_irq(void)
 {
     uint32_t pending = EXTI->PR & EXTI->IMR & trigger_mask;
-    EXTI->PR = 0xffu;
-    if (!active || !armed || !pending) return;
-    EXTI->IMR &= ~0xffu;
-    armed = false;
+    EXTI->PR = SAMPLE_PIN_MASK;
+    if (!capture_active || !waiting_for_trigger || !pending) return;
+    EXTI->IMR &= ~SAMPLE_PIN_MASK;
+    waiting_for_trigger = false;
     TIM8->CNT = 0;
     TIM8->SR = 0;
     TIM8->CR1 |= TIM_CR1_CEN;
-    event = CAPTURE_HW_TRIGGERED;
+    pending_event = CAPTURE_HW_TRIGGERED;
 }
 
 static void complete(void)
 {
     bool stopped = stop_hardware();
-    next_write = count - DMA2_Stream5->NDTR;
+    bool dma_failed = (DMA2->HISR & DMA_ERROR_FLAGS) != 0;
+    next_write_index = sample_count - DMA2_Stream5->NDTR;
     __DMB();
-    event = stopped ? CAPTURE_HW_COMPLETE : CAPTURE_HW_ERROR;
+    /* TIM8's IRQ can run before an already-pending DMA error IRQ. Inspect
+     * status after the last transfer stops, before publishing the buffer. */
+    pending_event = stopped && !dma_failed ? CAPTURE_HW_COMPLETE : CAPTURE_HW_ERROR;
 }
 
 void capture_stm32_tim8_update_irq(void)
 {
     if (!(TIM8->SR & TIM_SR_UIF)) return;
     TIM8->SR = 0;
-    if (active) complete();
+    if (capture_active) complete();
 }
 
 void capture_stm32_dma2_stream5_irq(void)
 {
     uint32_t status = DMA2->HISR;
-    DMA2->HIFCR = DMA_HIFCR_CTCIF5 | DMA_HIFCR_CHTIF5 | DMA_HIFCR_CTEIF5 |
-                   DMA_HIFCR_CDMEIF5 | DMA_HIFCR_CFEIF5;
-    if (!active) return;
-    if (status & (DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5)) {
+    DMA2->HIFCR = DMA_CLEAR_FLAGS;
+    if (!capture_active) return;
+    if (status & DMA_ERROR_FLAGS) {
         stop_hardware();
-        event = CAPTURE_HW_ERROR;
+        pending_event = CAPTURE_HW_ERROR;
     } else if (!trigger_mask && (status & DMA_HISR_TCIF5)) complete();
 }

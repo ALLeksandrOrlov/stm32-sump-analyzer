@@ -4,6 +4,9 @@
 #include "usbd_cdc_if.h"
 #include <string.h>
 
+/* Only foreground code touches app and rx_offset. USB callbacks publish a
+ * complete packet through rx_length, then leave OUT unarmed until consumption.
+ * Reset is deferred so the parser/controller are never mutated by an IRQ. */
 static analyzer_app_t app;
 static uint8_t rx[64];
 static volatile uint32_t rx_length;
@@ -11,13 +14,13 @@ static uint32_t rx_offset;
 static volatile bool reset_pending;
 static volatile bool rx_fault;
 
-static bool ready(void *context)
+static bool usb_tx_ready(void *context)
 {
     (void)context;
     return Analyzer_CDC_Ready();
 }
 
-static bool write_bytes(void *context, const uint8_t *bytes, size_t length)
+static bool usb_write(void *context, const uint8_t *bytes, size_t length)
 {
     (void)context;
     uint32_t mask = __get_PRIMASK();
@@ -32,7 +35,7 @@ void analyzer_board_init(void)
 {
     capture_stm32_init();
     analyzer_app_init(&app, capture_stm32_driver(),
-                      (analyzer_transport_t){NULL, ready, write_bytes},
+                      (analyzer_transport_t){NULL, usb_tx_ready, usb_write},
                       capture_stm32_timer_clock_hz());
 }
 
@@ -44,10 +47,13 @@ void analyzer_board_usb_receive(const uint8_t *bytes, uint32_t length)
         reset_pending = true;
         return;
     }
+    if (!length) {
+        Analyzer_CDC_Rearm();
+        return;
+    }
     memcpy(rx, bytes, length);
     __DMB();
     rx_length = length;
-    if (!length) Analyzer_CDC_Rearm();
 }
 
 void analyzer_board_usb_reset(void)

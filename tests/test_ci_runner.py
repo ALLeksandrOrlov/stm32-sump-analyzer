@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import xml.etree.ElementTree as ET
@@ -67,7 +68,7 @@ class PipelineTests(unittest.TestCase):
                                 'print("failure evidence"); raise SystemExit(7)'], reports, 10)
             self.assertEqual(result['exit_code'], 7)
             self.assertIn('failure evidence', (reports / 'failure.log').read_text())
-            with mock.patch.object(ci.subprocess, 'run', side_effect=subprocess.TimeoutExpired('qemu', 1)):
+            with mock.patch.object(ci, 'run_process', side_effect=subprocess.TimeoutExpired('qemu', 1)):
                 result = ci.execute('timeout', ['qemu'], reports, 1)
             self.assertNotEqual(result['exit_code'], 0)
             self.assertIn('timed out', (reports / 'timeout.log').read_text())
@@ -78,6 +79,81 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as error:
                 ci.main()
             self.assertEqual(error.exception.code, 2)
+
+    def test_output_symlink_cannot_escape_build_directory(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            (root / 'out').mkdir()
+            source = root / 'source'
+            source.mkdir()
+            (source / 'important.c').write_text('source')
+            (root / 'out/link').symlink_to(source, target_is_directory=True)
+            with mock.patch.object(ci, 'ROOT', root), \
+                 mock.patch.object(sys, 'argv', ['ci.py', '--output', 'out/link']), \
+                 mock.patch('sys.stderr', new_callable=io.StringIO):
+                with self.assertRaises(SystemExit) as error:
+                    ci.main()
+            self.assertEqual(error.exception.code, 2)
+            self.assertEqual((source / 'important.c').read_text(), 'source')
+
+    def test_packaging_failure_discards_partial_release_and_reports_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+
+            def stage(name, command, reports, timeout):
+                (reports / f'{name}.log').write_text('stage passed')
+                return dict(name=name, exit_code=0, seconds=0, log=f'{name}.log')
+
+            def incomplete_package(output, *args):
+                (output / 'dist').mkdir()
+                (output / 'dist/partial.bin').write_bytes(b'partial')
+                raise OSError('missing ELF')
+
+            with mock.patch.object(ci, 'ROOT', root), \
+                 mock.patch.object(ci, 'execute', stage), \
+                 mock.patch.object(ci, 'package', incomplete_package), \
+                 mock.patch.object(sys, 'argv', ['ci.py']), \
+                 mock.patch('sys.stdout', new_callable=io.StringIO):
+                self.assertEqual(ci.main(), 1)
+            self.assertFalse((root / 'out/ci/dist').exists())
+            report = ET.parse(root / 'out/ci/reports/junit.xml').getroot()
+            self.assertIn('missing ELF', report.find("testcase[@name='packaging']/failure").text)
+
+    def test_reports_accept_terminal_control_characters(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reports = Path(temp)
+            (reports / 'failed.log').write_bytes(b'\x1b[31mFAIL\x1b[0m\x00\xff')
+            result = dict(name='failed', exit_code=1, seconds=0, log='failed.log')
+            self.assertEqual(ci.write_reports(reports, [result]), 1)
+            report = ET.parse(reports / 'junit.xml').getroot()
+            self.assertIn('FAIL', report.find('testcase/failure').text)
+
+    def test_missing_executable_keeps_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reports = Path(temp)
+            result = ci.execute('missing', [str(reports / 'not-installed')], reports, 1)
+            self.assertNotEqual(result['exit_code'], 0)
+            self.assertIn('not-installed', (reports / 'missing.log').read_text())
+
+    def test_timeout_stops_descendant_processes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reports = Path(temp)
+            escaped = reports / 'child-finished'
+            child = 'import time,pathlib; time.sleep(1.5); pathlib.Path(%r).touch()' % str(escaped)
+            parent = ('import subprocess,sys; '
+                      'subprocess.Popen([sys.executable, "-c", %r]); '
+                      'print("child started", flush=True); '
+                      'import time; time.sleep(30)') % child
+            result = ci.execute('process-tree', [sys.executable, '-c', parent], reports, 0.5)
+            self.assertNotEqual(result['exit_code'], 0)
+            self.assertIn('child started', (reports / 'process-tree.log').read_text())
+            time.sleep(1.6)
+            self.assertFalse(escaped.exists(), 'timeout left a compiler/QEMU child running')
+
+    def test_empty_tool_version_is_a_packaging_error(self):
+        with mock.patch.object(ci.subprocess, 'check_output', return_value=''):
+            with self.assertRaisesRegex(ValueError, 'No version'):
+                ci.version(['compiler', '--version'])
 
 
 if __name__ == '__main__':
