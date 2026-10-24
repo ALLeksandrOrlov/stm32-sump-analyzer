@@ -12,5 +12,6 @@
 - [FreeRTOS Kernel](../third_party/FreeRTOS-Kernel/README.md): версия, исходники, лицензия и контрольные суммы зависимости.
 - [Проверка на плате](hardware-validation.md): USB, сигналы, триггеры и частоты.
 - [Результаты STM32F4 Discovery, 24.10.2026](hardware-results/stm32f4-discovery-2026-10-24.md): испытания физического USB, захвата PD0 и нагрузки на транспорт.
+- [Триггер от кнопки USER, 24.10.2026](hardware-results/stm32f4-discovery-user-button-2026-10-24.md): нажатие и отпускание PA0 во временной диагностической сборке.
 - [Диагностика](troubleshooting.md): частые ошибки и требования к Docker.
 - [Тестирование](verification.md): контракты, уровни проверки и оценка покрытия.
