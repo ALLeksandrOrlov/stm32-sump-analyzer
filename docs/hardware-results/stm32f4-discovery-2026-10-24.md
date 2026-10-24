@@ -1,194 +1,187 @@
-# STM32F4 Discovery: результаты испытаний 24 октября 2026 года
+# STM32F4 Discovery test results — 24 October 2026
 
-На физической плате прошли 12 проверок SUMP через USB, 6 проверок захвата
-сигнала PD0 и серия из 30 000 запросов ID без повреждённых или потерянных
-ответов. Проверено физическое отключение USB во время ожидания триггера
-и восстановление обмена после подключения. Контейнерный CI той же версии
-прошёл все 9 этапов.
+The physical board passed 12 USB/SUMP checks, six PD0 capture checks, and 30,000 ID
+requests without corrupted or missing replies. Removing USB while waiting for a
+trigger stopped capture; reconnecting restored communication. The container CI
+run for the same firmware revision passed all nine stages.
 
-Дополнительная [проверка кнопкой USER](stm32f4-discovery-user-button-2026-10-24.md)
-использует отдельную диагностическую сборку с каналом 0 на PA0;
-её результаты и подтверждение возврата штатных входов описаны отдельно.
+The additional [USER button test](stm32f4-discovery-user-button-2026-10-24.md)
+uses a separate diagnostic build with channel 0 on PA0. Its results and restoration
+of the normal input configuration are documented separately.
 
-## Объект и условия
+## Device and conditions
 
-| Параметр | Значение |
+| Parameter | Value |
 | --- | --- |
-| Плата | STM32F4 Discovery, STM32F407 |
-| Версия исходников | `51bf62b7d927a4b8163999f41db067e54011478a` |
-| Состояние исходников при сборке | Без незакоммиченных изменений |
-| Компилятор | Arm GNU Toolchain GCC 12.2.1, `20221205` |
-| Прошивка | `stm32_sump_analyzer.elf` из контейнерной CI-сборки |
-| Транспорт команд и отсчётов | Физический USB OTG FS, CDC |
-| Отладчик | Встроенный ST-Link с прошивкой J-Link; SWD 250 кГц |
-| Источник сигнала | Выход PD0 той же платы, читаемый через GPIO IDR |
-| Внешние сигнальные подключения | Отсутствовали |
+| Board | STM32F4 Discovery, STM32F407 |
+| Source revision | `51bf62b7d927a4b8163999f41db067e54011478a` |
+| Source state at build | Clean working tree |
+| Compiler | Arm GNU Toolchain GCC 12.2.1, `20221205` |
+| Firmware | `stm32_sump_analyzer.elf` from container CI |
+| Command and sample transport | Physical USB OTG FS, CDC |
+| Debug probe | Onboard ST-Link running J-Link firmware; SWD at 250 kHz |
+| Signal source | The board's PD0 output, read through GPIO IDR |
+| External signal connections | None |
 
-Контрольные суммы SHA-256 файлов той же CI-сборки:
+SHA-256 checksums of artifacts from that CI build:
 
-| Файл | SHA-256 |
+| File | SHA-256 |
 | --- | --- |
 | `stm32_sump_analyzer.elf` | `f6b4772cd9247245eb38aaaf91af8a363f1b7feb95f60e5e35c3c73278554e9b` |
 | `stm32_sump_analyzer.bin` | `ecfa7eb1d9ee07b4c27c589b98ee1bc3cbe87c824268e18ead4f28ef36f2d8d1` |
 
-Во время испытаний процессор не останавливался отладчиком. Для проверки
-сигнала PD0 временно переводился в режим выхода; уровень менялся записью
-в GPIO через SWD. Захват продолжал работать в самой прошивке, а данные
-передавались через USB. После проверки режим GPIO был восстановлен;
-отчёт содержит `restored_moder: 0x0`.
+The debugger did not halt the CPU during testing. For the PD0 checks, the pin was
+temporarily configured as an output and changed through SWD writes to GPIO.
+Firmware capture continued running and returned data through USB. The GPIO mode
+was restored afterwards; the report records `restored_moder: 0x0`.
 
-Такой стенд проверяет путь GPIO → DMA → приложение → USB и реакцию
-на фронты одного канала. Источник сигнала не является независимым
-измерителем частоты или времени.
+This setup exercises GPIO → DMA → application → USB and edge handling on one
+channel. Its signal source is not an independent frequency or timing instrument.
 
-## USB и команды SUMP — 12 из 12
+## USB and SUMP commands — 12/12
 
-Для захватов запрошены 100 000 отсчётов/с, период SUMP 10 000 нс.
-Эта частота задавалась командой; её физическая точность в данном испытании
-не измерялась.
+Captures requested 100,000 samples/s, a SUMP period of 10,000 ns. This was a
+commanded rate; its physical accuracy was not measured in this test.
 
-| Проверка | Результат |
+| Check | Result |
 | --- | --- |
-| ID и метаданные | Пройдена |
-| Захват 4 отсчётов | Получены 4 байта |
-| Захват 68 отсчётов | Получены 68 байт |
-| Захват 1024 отсчётов | Получены 1024 байта |
-| Захват полного буфера | Получены 28 672 байта |
-| Повторный RUN сразу после захвата | Пройдены 10 последовательных захватов по 68 отсчётов |
-| Команды, разделённые между записями USB | Пройдена, получены 68 отсчётов |
-| RESET, ID, метаданные и ID одной серией | Ответы проверены |
-| RESET после незавершённой команды | Синхронизация восстановлена |
-| Неизвестная длинная команда | Границы следующих команд сохранены |
-| RUN с отключённой группой входов | Проверено восстановление и последующий захват 4 отсчётов |
-| RUN с превышением размера буфера | Проверено восстановление и последующий захват 4 отсчётов |
+| ID and metadata | Passed |
+| 4-sample capture | Received 4 bytes |
+| 68-sample capture | Received 68 bytes |
+| 1024-sample capture | Received 1024 bytes |
+| Full-buffer capture | Received 28,672 bytes |
+| RUN immediately after a capture | Passed 10 consecutive 68-sample captures |
+| Commands split across host USB writes | Passed; received 68 samples |
+| RESET, ID, metadata, and ID in one batch | Replies verified |
+| RESET after an incomplete command | Synchronization recovered |
+| Unknown long command | Subsequent command boundaries preserved |
+| RUN with input group disabled | Recovery and subsequent 4-sample capture verified |
+| RUN exceeding buffer capacity | Recovery and subsequent 4-sample capture verified |
 
-Устройство сообщило имя `STM32 SUMP Analyzer`, версию `0.1.0-dev`,
-8 каналов, буфер 28 672 байта и максимальную частоту 20 МГц.
-Последнее значение является метаданными устройства: этот прогон не
-подтверждает захват на 20 МГц. Начальная и завершающая очистка транспорта
-не обнаружила лишних байтов.
+The device reported `STM32 SUMP Analyzer`, version `0.1.0-dev`, eight channels,
+28,672 bytes of sample memory, and a maximum rate of 20 MHz. The last value is
+device metadata; this run does not establish capture at 20 MHz. Initial and final
+transport drains found no extra bytes.
 
-## Сигнал PD0 — 6 из 6
+## PD0 signal — 6/6
 
-| Проверка | Результат |
+| Check | Result |
 | --- | --- |
-| Постоянный низкий уровень | Проверены 128 отсчётов |
-| Постоянный высокий уровень | Проверены 128 отсчётов |
-| Три перехода уровня | Проверены 1024 отсчёта и порядок `0 → 1 → 0 → 1` |
-| Нарастающий фронт | Получены 128 отсчётов |
-| Спадающий фронт | Получены 128 отсчётов |
-| RESET во время ожидания фронта | Получен корректный четырёхбайтовый ID |
+| Constant low | Verified 128 samples |
+| Constant high | Verified 128 samples |
+| Three level changes | Verified 1024 samples and the order `0 → 1 → 0 → 1` |
+| Rising edge | Received 128 samples |
+| Falling edge | Received 128 samples |
+| RESET while waiting for an edge | Received the correct four-byte ID |
 
-Для последовательности с тремя переходами хронологические группы составили
-210 низких, 211 высоких, 205 низких и 398 высоких отсчётов.
-Эти количества подтверждают наблюдавшуюся последовательность уровней;
-они не используются для оценки частоты, джиттера или задержки триггера.
+The three-transition capture contained chronological groups of 210 low, 211 high,
+205 low, and 398 high samples. These counts establish the observed sequence of
+levels; they are not used to estimate frequency, jitter, or trigger latency.
 
-## USB при приостановленном чтении
+## USB with host reading paused
 
-Хост отправил 30 000 запросов ID и на 0,5 с приостановил чтение ответов.
-После возобновления чтения получены ровно 120 000 байт:
-30 000 последовательных ответов `1ALS`, без пропусков, повреждений
-или лишних данных. Чтение после паузы заняло около 1,358 с; это время
-конкретного сценария с хостом, а не измерение предельной скорости USB.
+The host sent 30,000 ID requests and paused reply reads for 0.5 s. After reads
+resumed, exactly 120,000 bytes were received: 30,000 consecutive `1ALS` replies,
+with no omissions, corruption, or extra data. Reading after the pause took about
+1.358 s. This is the duration of this host scenario, not a maximum USB throughput
+measurement.
 
-Диагностические поля `paused_state` считывались последовательно при
-работающем процессоре. Они не образуют атомарный снимок, поэтому разность
-счётчиков принятых и освобождённых сообщений не используется для оценки
-очереди или поиска утечек. Результат этой проверки основан на полном
-сравнении полученной последовательности ответов с ожидаемой.
+The `paused_state` diagnostic fields were read sequentially while the CPU was
+running. They are not an atomic snapshot, so the difference between accepted and
+released message counters is not used to estimate queue depth or detect leaks.
+The result is based on comparing the complete received reply sequence with the
+expected bytes.
 
-## Физическое отключение и подключение USB
+## Physical USB removal and reconnection
 
-Кабель USB OTG FS извлекли во время ожидания нарастающего фронта PD0.
-Плата продолжала получать питание от отладчика. Состояние приложения
-и разрешение DMA/таймера проверялись через SWD без остановки процессора.
+The USB OTG FS cable was removed while waiting for a rising edge on PD0. The board
+remained powered by the debug probe. Application state and DMA/timer enables were
+read through SWD without halting the CPU.
 
-| Этап | USB `connected` | Состояние захвата | DMA | Таймер |
+| Stage | USB `connected` | Capture state | DMA | Timer |
 | --- | ---: | --- | --- | --- |
-| До отключения | 1 | `ARMED` | Включён | Включён |
-| После отключения | 0 | `IDLE` | Выключен | Выключен |
-| После подключения | 1 | `IDLE` | Выключен | Выключен |
+| Before removal | 1 | `ARMED` | Enabled | Enabled |
+| After removal | 0 | `IDLE` | Disabled | Disabled |
+| After reconnection | 1 | `IDLE` | Disabled | Disabled |
 
-После подключения проверены ответ ID `1ALS` и новый захват 68 отсчётов.
-Получены ровно 68 байт; проверка отсутствия лишних данных и завершающий
-RESET прошли. Результат подтверждает отмену ожидающего захвата при
-извлечении кабеля и восстановление командного обмена без снятия питания.
-Отключение во время активной передачи USB IN этим сценарием не проверялось.
+After reconnection, the `1ALS` ID reply and a new 68-sample capture were verified.
+Exactly 68 bytes arrived; the extra-data check and final RESET passed. This
+establishes cancellation of an armed capture on cable removal and recovery of
+command exchange without a power cycle. Removal during an active USB IN transfer
+was not tested by this scenario.
 
-## Состояние FreeRTOS после нагрузки
+## FreeRTOS state after load
 
-При измерении после нагрузки планировщик был запущен: `xSchedulerRunning = 1`,
-число задач — 3. Между двумя чтениями `xTickCount` увеличился
-с 266 728 до 266 837. В момент чтения регистры ошибок `CFSR` и `HFSR`
-были равны нулю; сохранённые поля аварийной остановки `failure_file`
-и `failure_line` также были нулевыми.
+After the load tests, the scheduler was running (`xSchedulerRunning = 1`) with
+three tasks. `xTickCount` advanced from 266,728 to 266,837 between two reads.
+At the time of reading, `CFSR`, `HFSR`, and the recorded fatal-error fields
+`failure_file` and `failure_line` were all zero.
 
-По дампам стеков получена следующая оценка минимального свободного остатка.
-Одно слово стека занимает 4 байта.
+Stack dumps gave the following estimates of minimum free space. One stack word
+is four bytes.
 
-| Задача | Размер стека, слов | Наблюдавшийся свободный остаток, слов | Свободный остаток, байт |
+| Task | Stack size, words | Observed free space, words | Free space, bytes |
 | --- | ---: | ---: | ---: |
-| Приложение (`application`) | 768 | 683 | 2732 |
-| Передача USB (`transmitter`) | 512 | 453 | 1812 |
+| Application (`application`) | 768 | 683 | 2732 |
+| USB TX (`transmitter`) | 512 | 453 | 1812 |
 | Idle | 256 | 236 | 944 |
 
-Оценка основана на длине непрерывного участка заполнения `0xA5`
-от младшего адреса стека, как при вычислении high-water mark FreeRTOS.
-Это эвристика для выполненного сценария: она не доказывает максимальную
-глубину стека при всех возможных нагрузках. Дампы снимались без остановки
-процессора и не являются атомарным снимком состояния всех задач.
+The estimate uses the contiguous `0xA5` fill region starting at the low address of
+each stack, as in a FreeRTOS high-water mark. It is a heuristic for the executed
+scenario, not proof of maximum stack depth under every possible load. The dumps
+were taken without halting the CPU and do not form an atomic snapshot of all tasks.
 
-## Настройки периферии на плате
+## Peripheral configuration
 
-Чтение регистров подтвердило настройки, используемые при испытаниях:
+Register reads confirmed the configuration used in the tests:
 
-| Регистр | Прочитанное значение | Проверенные поля |
+| Register | Value | Verified fields |
 | --- | --- | --- |
-| `DMA2_Stream5_CR` | `0x0c025507` | `PSIZE = 2`, `MSIZE = 2`: чтение периферии и запись памяти 32-битными словами |
-| `GPIOA_MODER` | `0xaa800000` | `MODER9 = 0`: PA9 настроен как вход |
-| `USB_GCCFG` | `0x0009ffff` | `VBUSBSEN = 1`, `NOVBUSSENS = 0`: аппаратное определение VBUS включено |
+| `DMA2_Stream5_CR` | `0x0c025507` | `PSIZE = 2`, `MSIZE = 2`: 32-bit peripheral reads and memory writes |
+| `GPIOA_MODER` | `0xaa800000` | `MODER9 = 0`: PA9 is an input |
+| `USB_GCCFG` | `0x0009ffff` | `VBUSBSEN = 1`, `NOVBUSSENS = 0`: hardware VBUS sensing enabled |
 
-Эти значения подтверждают конфигурацию DMA и USB. Реакция на физическое
-отключение кабеля проверена в описанном выше сценарии ожидания триггера.
+These values establish DMA and USB configuration. Physical cable removal was
+checked in the armed-trigger scenario described above.
 
-## Контейнерный CI — 9 из 9
+## Container CI — 9/9
 
-Успешно завершились `pipeline`, `cubemx`, `native`, `sanitizers`,
-`coverage`, `qemu-core`, `qemu-stm32`, `qemu-rtos` и `firmware`.
-В сборке использовался QEMU 9.2.4 с моделью проекта;
-`build-info.json` сообщает `tests: passed`.
+The `pipeline`, `cubemx`, `native`, `sanitizers`, `coverage`, `qemu-core`,
+`qemu-stm32`, `qemu-rtos`, and `firmware` stages all succeeded. The build used
+QEMU 9.2.4 with the project model; `build-info.json` records `tests: passed`.
 
-Проверки в QEMU и на плате дополняют друг друга. Состав автоматических
-проверок описан в [документации CI/CD](../ci-cd.md), а их границы —
-в [методике тестирования](../verification.md).
+QEMU and physical board tests complement each other. The
+[CI/CD guide](../ci-cd.md) describes the automated checks; the
+[verification strategy](../verification.md) defines their boundaries.
 
-## Что остаётся проверить
+## Remaining validation
 
-- Физическое отключение USB во время активной передачи USB IN.
-- Холодный запуск после полного снятия питания.
-- Независимое измерение частоты выборки, джиттера и точности положения
-  триггера, в том числе при предельной частоте и активном USB.
-- Электрические характеристики входов и работа с внешним источником сигнала.
-- Длительность обработчиков прерываний.
-- Остаток стеков при других нагрузках, включая переподключение USB.
+- Physical USB removal during an active USB IN transfer.
+- Cold start after removing all power.
+- Independent measurement of sample rate, jitter, and trigger-position accuracy,
+  including the maximum rate with USB active.
+- Input electrical characteristics and an external signal source.
+- Interrupt-handler duration.
+- Stack free space under other loads, including USB reconnection.
 
-Испытания PD0 не подтверждают электрические и временные свойства остальных
-семи каналов. Порядок дальнейших измерений приведён в
-[программе проверки на плате](../hardware-validation.md).
+PD0 testing does not establish the electrical or timing properties of the other
+seven channels. Further measurements follow the
+[hardware validation procedure](../hardware-validation.md).
 
-## Основания отчёта
+## Evidence
 
-Результаты взяты из артефактов запуска для `51bf62b`:
+Results come from these run artifacts for `51bf62b`:
 
-- `usb-smoke/report.json` — команды, размеры захватов и контрольные суммы данных;
-- `pd0-loopback/report.json` — шесть проверок PD0;
-- `usb-stress/report.json` — серия ID при приостановленном чтении;
-- `disconnect-observed/report.json` — физическое отключение в состоянии `ARMED` и восстановление работы после подключения;
-- `runtime-and-stacks.json` — состояние планировщика, регистры ошибок и оценка остатка стеков;
-- `peripheral-settings.json` — прочитанные настройки DMA, GPIO и USB;
-- `reports/summary.md` и `reports/results.json` — результаты девяти этапов CI;
-- `dist/build-info.json` — версия исходников и инструменты сборки.
+- `usb-smoke/report.json`: commands, capture lengths, and data checksums.
+- `pd0-loopback/report.json`: six PD0 checks.
+- `usb-stress/report.json`: ID requests with host reading paused.
+- `disconnect-observed/report.json`: physical removal in `ARMED` and recovery
+  after reconnection.
+- `runtime-and-stacks.json`: scheduler state, fault registers, stack-space
+  estimates.
+- `peripheral-settings.json`: DMA, GPIO, and USB register reads.
+- `reports/summary.md` and `reports/results.json`: nine CI stage outcomes.
+- `dist/build-info.json`: source revision and build tools.
 
-Идентификаторы USB конкретного экземпляра платы и локальные пути стенда
-в публичный отчёт не включены.
+Board-specific USB identifiers and local test-system paths are omitted from this
+public report.

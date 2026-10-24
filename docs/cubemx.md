@@ -1,83 +1,88 @@
-# Повторная генерация CubeMX
+# CubeMX regeneration
 
-В `stm32_sump_analyzer.ioc` включено `ProjectManager.KeepUserCode=true`.
-Ручные изменения генерируемых файлов `Src/` и `Inc/` разрешены только между
-соответствующими маркерами `USER CODE BEGIN/END`. Это относится и к комментариям,
-заголовкам, определениям и коду обработчиков.
+`stm32_sump_analyzer.ioc` sets `ProjectManager.KeepUserCode=true`. Manual changes
+to generated files in `Src/` and `Inc/` must stay between the appropriate
+`USER CODE BEGIN/END` markers. This applies to comments, headers, definitions and
+interrupt handler code.
 
-- `main.c`: include, `analyzer_board_init()` в SysInit и запуск планировщика
-  `analyzer_board_start()` в секции 2. Обработка команд выполняется задачей;
-  после успешного запуска планировщика сгенерированный цикл main не исполняется.
-- `stm32f4xx_it.c`: include, подключение обработчиков SVC/PendSV порта FreeRTOS,
-  дополнение SysTick и переходники EXTI/TIM8/DMA/TIM6_DAC в секции 1.
-- `usbd_cdc_if.c`: include и callbacks 3/4/6/7. Callbacks USB копируют данные
-  и уведомляют задачи; в них нет парсера, управления захватом и ожидания TX.
-- `usb_device.c`: в Includes подставляется таблица класса `usb_cdc_port_class()`;
-  переопределение снимается в USB_DEVICE_Init_PostTreatment. Так адаптер получает
-  завершение IN-передачи, сохраняя остальные callbacks библиотеки ST.
-- `usbd_conf.c`: include и вызов `usb_cdc_port_configure_irq()` в
-  USB_OTG_FS_MspInit 1. Он задаёт приоритет 6 и оставляет IRQ выключенным
-  до вызова `activate()` из задачи TX после старта ядра. В MspInit 0 включается
-  `vbus_sensing_enable` до настройки USB-ядра HAL. В MspInit 1 PA9 настраивается
-  как вход без подтяжек; MspDeInit 1 освобождает этот вывод.
-- `usbd_desc.c`: общий заголовок идентификации в INCLUDE; переопределения
-  строк USB в PRIVATE_DEFINES. Имя устройства сохраняется после генерации.
-- Заголовки: declarations/includes внутри соответствующих пользовательских секций.
+- `main.c`: includes, `analyzer_board_init()` in SysInit, and the scheduler start
+  through `analyzer_board_start()` in section 2. A task processes commands; after
+  a successful scheduler start, the generated main loop does not run.
+- `stm32f4xx_it.c`: includes, integration of the FreeRTOS SVC/PendSV handlers,
+  SysTick additions, and EXTI/TIM8/DMA/TIM6_DAC adapters in section 1.
+- `usbd_cdc_if.c`: includes and callbacks 3/4/6/7. USB callbacks copy data and
+  notify tasks. They do not parse commands, control capture or wait for TX.
+- `usb_device.c`: Includes substitutes the class table from
+  `usb_cdc_port_class()`; USB_DEVICE_Init_PostTreatment removes the override.
+  This lets the adapter observe IN completion while retaining the other ST
+  library callbacks.
+- `usbd_conf.c`: includes and `usb_cdc_port_configure_irq()` in
+  USB_OTG_FS_MspInit 1. It sets priority 6 and keeps the IRQ disabled until the
+  TX task calls `activate()` after the scheduler starts. MspInit 0 enables
+  `vbus_sensing_enable` before HAL configures the USB core. MspInit 1 configures
+  PA9 as an input without pulls; MspDeInit 1 releases the pin.
+- `usbd_desc.c`: the shared identity header in INCLUDE and USB string overrides
+  in PRIVATE_DEFINES. Regeneration preserves the device name.
+- Headers: declarations and includes inside their corresponding user sections.
 
-Каталоги `core/`, `platform/`, `tests/`, `qemu/` и `GNUmakefile` вручную
-поддерживаются отдельно. Обычный `make` использует `GNUmakefile`, а не перезаписанный
-CubeMX Makefile. Проект проверен с существующей раскладкой `Src/Inc` и библиотеками
-STM32Cube FW_F4 V1.24.2. Обновление CubeMX/HAL до иной структуры каталогов требует
-отдельной проверки сборки и USB API.
+The `core/`, `platform/`, `tests/` and `qemu/` directories and `GNUmakefile` are
+maintained separately. Plain `make` uses `GNUmakefile` rather than the Makefile
+that CubeMX can overwrite. The project is verified with its existing `Src/Inc`
+layout and STM32Cube FW_F4 V1.24.2 libraries. A CubeMX/HAL update that changes
+the directory layout requires separate build and USB API validation.
 
-Ядро FreeRTOS и его ARM_CM4F-порт находятся в `third_party/FreeRTOS-Kernel/`,
-настройки и hooks — в `platform/freertos/`. Не подключайте вторую копию ядра
-или CMSIS-RTOS через генератор. SVC и PendSV требуют непосредственного входа
-в обработчики порта, без обычных C-обёрток: они работают со стеком прерванной
-задачи. В USER CODE Includes имена пустых генерируемых функций переопределяются,
-чтобы в таблице векторов остались обработчики FreeRTOS. SysTick сохраняет
-`HAL_IncTick()` и вызывает поддержку RTOS только после старта планировщика.
+The FreeRTOS kernel and ARM_CM4F port are in `third_party/FreeRTOS-Kernel/`;
+configuration and hooks are in `platform/freertos/`. Do not add another copy of
+the kernel or CMSIS-RTOS through the generator. SVC and PendSV must enter the
+port handlers directly, without ordinary C wrappers, because they operate on
+the interrupted task's stack. USER CODE Includes renames the empty generated
+handlers so the vector table resolves to the FreeRTOS handlers. SysTick retains
+`HAL_IncTick()` and calls RTOS support only after the scheduler starts.
 
-После создания статических задач код платы восстанавливает исходный BASEPRI:
-инициализация USB использует задержки HAL и нуждается в работающем SysTick.
-Это не разрешает ранние callbacks USB: его IRQ остаётся выключенным до `activate()`.
+After creating static tasks, board code restores the original BASEPRI: USB
+initialization uses HAL delays and needs a running SysTick. This does not allow
+early USB callbacks; the USB IRQ stays disabled until `activate()`.
 
-В `.ioc` PA9 назначен `USB_OTG_FS_VBUS` в режиме `Activate_VBUS`, а параметр
-`USB_OTG_FS.vbus_sensing_enable` равен `ENABLE`. PA9 должен быть связан с VBUS
-разъёма USB FS: это позволяет обнаружить извлечение кабеля при отдельном питании
-платы. Секции MSP сохраняют ту же настройку при повторной генерации; если CubeMX
-также создаёт настройку PA9, повторное применение входного режима безопасно.
-Нативная проверка `tests/test_usb_vbus.py` исполняет функции LL/MSP с подменой HAL
-и проверяет, что sensing и вход PA9 готовы до настройки USB-ядра. Она также
-проверяет закрытие endpoint перед callback деинициализации CDC. Физическая цепь
-VBUS и поведение при извлечении кабеля проверяются [на плате](hardware-validation.md).
+The `.ioc` assigns PA9 to `USB_OTG_FS_VBUS` in `Activate_VBUS` mode and sets
+`USB_OTG_FS.vbus_sensing_enable` to `ENABLE`. PA9 must be connected to the USB FS
+connector's VBUS so the device detects cable removal while powered separately.
+The MSP sections preserve this configuration across regeneration. If CubeMX
+also generates PA9 configuration, applying input mode a second time is safe.
+The native check in `tests/test_usb_vbus.py` executes the LL/MSP functions with
+HAL stubs and verifies that sensing and the PA9 input are ready before USB core
+configuration. It also checks that endpoints close before the CDC
+deinitialization callback. The physical VBUS circuit and cable removal behavior
+are checked [on hardware](hardware-validation.md).
 
 ```sh
 make check-cubemx
 ```
 
-Проверка исключает содержимое USER CODE из файлов, перечисленных в
-`tests/cubemx_generated.sha256.json`, и сравнивает SHA256 остального текста
-с утверждённым эталоном. Также проверяется парность маркеров. Тест не запускает
-CubeMX и не является доказательством работы произвольной будущей версии генератора.
-Порядок повторной генерации:
+This check removes USER CODE contents from the files listed in
+`tests/cubemx_generated.sha256.json` and compares the SHA256 hashes of the
+remaining text with the approved baseline. It also checks marker pairing. The
+test does not run CubeMX or prove compatibility with arbitrary future generator
+versions.
 
-1. Сохранить рабочие изменения в Git и проверить актуальность `.ioc`.
-2. Сгенерировать проект с включённым Keep User Code.
-3. Просмотреть diff: точки подключения должны остаться внутри USER CODE,
-   определения обработчиков не должны дублироваться; SVC/PendSV должны
-   разрешаться в порт FreeRTOS, а SysTick обслуживать HAL и RTOS.
-4. Если генератор намеренно изменил текст вне секций, проверить каждое отличие
-   и обновить соответствующий SHA256 в эталоне.
-5. Запустить `make docker-build`; изменения USB и тактирования также проверить
-   на [плате](hardware-validation.md).
+To regenerate the project:
 
-Эталон нельзя обновлять автоматически при проверке: это скрывает нарушение границ.
+1. Save working changes in Git and verify that the `.ioc` is up to date.
+2. Generate the project with Keep User Code enabled.
+3. Review the diff. Integration points must remain inside USER CODE sections,
+   handler definitions must not be duplicated, SVC/PendSV must resolve to the
+   FreeRTOS port, and SysTick must service both HAL and the RTOS.
+4. If the generator intentionally changes text outside those sections, review
+   each difference before updating its SHA256 in the baseline.
+5. Run `make docker-build`. Also check USB and clock changes
+   [on hardware](hardware-validation.md).
 
-Не назначайте CubeMX те же TIM1/TIM8/DMA/EXTI обработчики: ими владеет адаптер.
-TIM6_DAC зарезервирован для программного уведомления о захвате с приоритетом 5;
-его обработчик вызывает `capture_task_events_irq()`. Этот IRQ нельзя одновременно
-использовать для другого таймера или DAC.
-Если переносите настройку этих ресурсов в `.ioc`, сначала удалите или перенесите
-соответствующие переходники в созданные CubeMX USER CODE секции, чтобы не получить
-дубли определений. Для повторной генерации текущего `.ioc` это не требуется.
+Never update the baseline automatically during verification: doing so would
+hide changes outside the permitted sections.
+
+Do not assign CubeMX the TIM1/TIM8/DMA/EXTI handlers owned by the adapter.
+TIM6_DAC is reserved for software capture notifications at priority 5; its
+handler calls `capture_task_events_irq()`. That IRQ cannot also serve another
+timer or the DAC. If you move configuration of these resources into the `.ioc`,
+first remove or move the corresponding adapters into the USER CODE sections
+created by CubeMX to avoid duplicate definitions. This is not needed when
+regenerating the current `.ioc`.

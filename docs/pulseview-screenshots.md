@@ -1,14 +1,15 @@
-# Снимки PulseView и тестовый транспорт
+# PulseView screenshots and test transport
 
-Снимки `docs/images/pulseview-connect.jpg` и `pulseview-i2c.jpg` сделаны
-в настоящем PulseView 0.4.2 из Debian Bookworm, с libsigrok 0.5.2.
-Устройство подключается через виртуальный serial-порт; имя приходит из SUMP
-метаданных текущего `core/sump_protocol.c`. Тестовый стенд использует также
-`analyzer_app` и `capture`, заменяя только транспорт и драйвер захвата.
+The screenshots in `docs/images/pulseview-connect.jpg` and
+`docs/images/pulseview-i2c.jpg` were captured in PulseView 0.4.2 from Debian
+Bookworm, using libsigrok 0.5.2. The device connects through a virtual serial
+port; its name comes from the SUMP metadata in `core/sump_protocol.c`.
+The fixture also uses `analyzer_app` and `capture`, replacing the transport
+and capture driver.
 
-## Воспроизведение
+## Reproduce the screenshots
 
-Из корня репозитория:
+Run from the repository root:
 
 ```sh
 docker build -t stm32-sump-analyzer-pulseview:local -f tools/pulseview/Dockerfile .
@@ -18,39 +19,48 @@ docker run --rm --name stm32-sump-pulseview \
   stm32-sump-analyzer-pulseview:local
 ```
 
-Откройте <http://localhost:6080/vnc.html?autoconnect=true&resize=scale>.
-Контейнер запускает PulseView с драйвером `ols` и портом
-`/tmp/stm32-sump-analyzer`. Для ручного обнаружения выберите
-**Openbench Logic Sniffer & SUMP compatibles**, Serial Port и этот путь.
-После сканирования появится **STM32 SUMP Analyzer** с восемью каналами.
+Open <http://localhost:6080/vnc.html?autoconnect=true&resize=scale>.
+The container starts PulseView with the `ols` driver and the serial port
+`/tmp/stm32-sump-analyzer`. To discover the device manually, choose
+**Openbench Logic Sniffer & SUMP compatibles**, **Serial Port** and that path.
+Scanning should find **STM32 SUMP Analyzer** with eight channels.
 
-Для примера I²C используйте 1 МГц, 1 k samples, D0 как SCL и D1 как SDA.
-Нажмите Run, затем `D`, найдите I²C и добавьте декодер двойным щелчком.
-В настройках декодера назначьте SCL → 0, SDA → 1. Каналы можно подписать SCL/SDA;
-клавиши `+` и `Home` позволяют показать первую транзакцию крупнее.
-Стенд повторяет каждые 400 отсчётов транзакцию записи по адресу `0x50`
-с байтами `0x10`, `0x2A` и ACK. Остальные шесть каналов имеют низкий уровень.
-При 1 МГц синтетическая частота SCL равна 100 кГц. Стенд не моделирует
-реальное время и не обещает изменение формы сигнала при выборе другой частоты.
+For the I²C example, select **1 MHz**, **1 k samples**, channel 0 for SCL and
+channel 1 for SDA. Click **Run**, then press **D**, find **I²C** and double-click
+to add the decoder. Set **SCL → 0** and **SDA → 1** in the decoder settings.
+Rename the channels SCL and SDA if desired; use **+** and **Home** to inspect
+the first transaction.
 
-Логи и исполняемый файл стенда находятся в `out/pulseview/`.
-Остановить окружение: `docker stop stm32-sump-pulseview`.
+The fixture repeats a write to address `0x50` with bytes `0x10`, `0x2A` and
+ACKs every 400 samples. The other six channels remain low. At a selected
+sample rate of 1 MHz, the synthetic SCL corresponds to 100 kHz. The fixture
+does not model elapsed physical time or change its pattern with the selected
+sample rate.
 
-## Границы проверки
+Logs and the fixture executable are written to `out/pulseview/`. Stop the
+session with:
 
-Сигнал синтетический: стенд проверяет обнаружение устройства, формат
-метаданных, передачу отсчётов и работу декодера, но не физический USB,
-GPIO/DMA STM32 или электрические характеристики платы.
+```sh
+docker stop stm32-sump-pulseview
+```
 
-В контейнере установлена отдельная сборка libserialport 0.1.1, фиксированный
-коммит `348a6d353af8ac142f68fbf9fe0f4d070448d945`. Для PTY отключён поиск
-аппаратных метаданных, а отсутствующие modem-control ioctl трактуются как
-неактивные линии только для `/dev/pts/*`. Байты протокола не подменяются.
-Патч не входит в прошивку или основной CI-контейнер.
+## What the fixture verifies
 
-Драйвер OLS автоматически включает флаг FPGA-фильтра при обычных частотах.
-Прошивка принимает этот флаг без изменения необработанных отсчётов GPIO.
-Проверить декодирование без GUI, когда захват в PulseView остановлен:
+The synthetic signal exercises device discovery, metadata, sample delivery
+and decoding. It does not verify physical USB, STM32 GPIO/DMA or the board's
+electrical characteristics. The README captions identify the demonstration
+port and synthetic transaction so they are not mistaken for hardware captures.
+
+The container builds libserialport 0.1.1 from pinned commit
+`348a6d353af8ac142f68fbf9fe0f4d070448d945`. Its PTY adaptation disables hardware
+metadata discovery and treats unsupported modem-control ioctls as inactive
+lines only for `/dev/pts/*`. It does not replace protocol bytes. This adaptation
+is confined to the screenshot environment; it is not part of the firmware or
+main CI image.
+
+The OLS driver enables the FPGA filter flag automatically at ordinary sample
+rates. The firmware accepts that hint without modifying raw GPIO samples.
+To check decoding without the GUI, first stop acquisition in PulseView, then run:
 
 ```sh
 docker exec stm32-sump-pulseview sigrok-cli \
@@ -58,8 +68,9 @@ docker exec stm32-sump-pulseview sigrok-cli \
   --samples 1000 -P i2c:scl=0:sda=1
 ```
 
-В выводе должны быть `Address write: 50`, `Data write: 10`, `Data write: 2A`, ACK и Stop.
-Описание элементов интерфейса: [руководство PulseView 0.4.2](https://sigrok.org/doc/pulseview/0.4.2/manual.html).
+The output should include `Address write: 50`, `Data write: 10`,
+`Data write: 2A`, ACK and Stop. For interface controls, see the
+[PulseView 0.4.2 manual](https://sigrok.org/doc/pulseview/0.4.2/manual.html).
 
-VNC слушает loopback внутри контейнера, web-интерфейс опубликован только
-на `127.0.0.1` хоста. Стенд предназначен для локальной разработки.
+VNC listens on loopback inside the container. The web interface is published
+only on the host's `127.0.0.1`; this fixture is intended for local development.

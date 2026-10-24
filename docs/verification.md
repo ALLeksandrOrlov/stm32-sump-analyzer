@@ -1,84 +1,83 @@
-# Методика тестирования
+# Verification strategy
 
-Проверки строятся вокруг контрактов и отказов, которые могут повредить захват:
-выход DMA за буфер, потеря команды на границе пакетов, изменение занятого
-TX-буфера, неверный порядок отсчётов и невозможность восстановиться после ошибки.
-Успех теста означает выполнение проверенного контракта в указанном окружении.
+Tests focus on contracts and failures that can corrupt a capture: DMA overruns,
+commands lost at packet boundaries, modification of an active TX buffer, incorrect
+sample order, and failure to recover from errors. A passing test establishes the
+checked contract in its stated environment.
 
-## Уровни проверки
+## Test levels
 
-| Уровень | Что проверяется | Что остаётся за пределами |
+| Level | What it checks | Outside its scope |
 | --- | --- | --- |
-| Нативное ядро | SUMP, проверка параметров, автомат состояний, расчёт периода, порядок отсчётов, отправка | Регистры STM32, IRQ, физический USB |
-| Нативный адаптер CDC | Отказ занятого порта, владение памятью, завершение с ZLP, вложенные критические секции, разрешение USB IRQ | Реальный USB-контроллер, планировщик и библиотека ST |
-| Сборка стенда PulseView | Согласованность тестового транспорта и генератора сигнала с интерфейсами ядра | Запуск GUI, декодирование сигнала, физический USB |
-| ASan/UBSan | Ошибки памяти и неопределённое поведение на исполненных путях | Неисполненные пути и аппаратные гонки |
-| Ядро в QEMU Cortex-M4 | Работа того же C-кода на целевой архитектуре | Физические характеристики микроконтроллера |
-| STM32-драйвер в расширенном QEMU | GPIO, DMA, таймеры, EXTI и обработчики прерываний через регистры | Точность модели, задержки шины, предельная частота |
-| FreeRTOS в QEMU Cortex-M4F | Настоящее ядро и порт, две рабочие задачи, MessageBuffer, IRQ-уведомления, отмена и переподключение | Физический USB и периферия захвата заменены управляемыми тестовыми портами |
-| FreeRTOS и STM32-драйвер в расширенном QEMU | Полный путь команды, захват DMA, переход из ISR приоритета 1 через IRQ приоритета 5 в задачу и выдача отсчётов | USB заменён тестовым портом; физические ограничения модели сохраняются |
-| Сборка прошивки | Совместная сборка приложения, FreeRTOS, адаптеров, HAL и USB, размещение в памяти | Исполнение прошивки на плате |
-| Плата с генератором и PulseView | USB, электрические уровни, частота захвата, точность триггера | Другие платы и непроверенные режимы |
+| Native core | SUMP, parameter validation, state machine, period calculation, sample order, transmission | STM32 registers, IRQs, physical USB |
+| Native CDC adapter | Busy rejection, memory ownership, ZLP completion, nested critical sections, USB IRQ enabling | USB hardware, scheduler, ST library |
+| PulseView fixture build | Compatibility of the test transport and signal generator with core interfaces | GUI execution, signal decoding, physical USB |
+| ASan/UBSan | Memory errors and undefined behavior on executed paths | Unexecuted paths and hardware races |
+| Core in QEMU Cortex-M4 | Execution of the same C code on the target architecture | Physical MCU characteristics |
+| STM32 driver in extended QEMU | Register-level GPIO, DMA, timers, EXTI, interrupt handlers | Model accuracy, bus delays, maximum frequency |
+| FreeRTOS in QEMU Cortex-M4F | Real kernel and port, two worker tasks, MessageBuffers, IRQ notifications, cancellation, reconnection | Physical USB and capture peripherals are replaced by controlled test ports |
+| FreeRTOS and STM32 driver in extended QEMU | Command-to-capture path, DMA, deferred notification from priority-1 ISR through priority-5 IRQ to task, sample transmission | USB uses a test port; physical model limitations still apply |
+| Firmware build | Combined application, FreeRTOS, adapters, HAL, USB, memory layout | Execution on a physical board |
+| Board with generator and PulseView | USB, electrical levels, sample rate, trigger accuracy | Other boards and untested operating modes |
 
-У модели QEMU и драйвера не должно быть общего алгоритма вычисления ожидаемых
-отсчётов. Тест задаёт сигнал и независимо проверяет результат, чтобы одна ошибка
-не повторялась одновременно в реализации и в проверке. Подробные границы модели:
-[QEMU](../qemu/README.md).
+The QEMU model and the driver must not share an algorithm for calculating expected
+samples. A test supplies the signal and checks the result independently, so a
+defect cannot be duplicated in both implementation and oracle. See the
+[QEMU model documentation](qemu.md) for its boundaries.
 
-## Контракты и приоритеты
+## Contracts and priorities
 
-| Область | Проверяемое поведение |
+| Area | Required behavior |
 | --- | --- |
-| Поток SUMP | Команда не зависит от разбиения на USB-пакеты; аргументы little-endian; неизвестная длинная команда занимает все пять байтов; RESET внутри аргумента не является командой |
-| Метаданные | Полные, ограниченные размером ответы; ID и параметры соответствуют устройству; числовые метаданные big-endian |
-| Преобразование команд | 24-битный делитель переводится в наносекунды; счётчики разворачиваются без переполнения; неподдерживаемые биты полного 32-битного FLAGS отклоняются при RUN |
-| План захвата | Нижние и верхние допустимые размеры, значения по обе стороны границ, post ≤ total, положительный период, отказ для нескольких каналов триггера или битов отсутствующих каналов |
-| Таймер | Реальная частота не превышает запрос и предел устройства; границы периода, переход между ARR и PSC, отказ при превышении ёмкости таймеров |
-| Автомат | Разрешённые переходы, запрет повторного RUN во время работы, снимок конфигурации на RUN, RESET и восстановление из ERROR |
-| Транспорт ядра | Копирование при принятии, несколько ожидающих пакетов, заполненная очередь, повтор write без потери позиции, ожидание полного завершения, отсутствие служебных ответов внутри отсчётов |
-| Отмена | RESET удаляет очередь и сохраняет активный пакет; новый захват может начаться без перезаписи памяти старой USB-передачи |
-| Адаптер CDC | Отказ write сохраняет владение у вызывающего кода; освобождение после ZLP; вложенные критические секции восстанавливают BASEPRI и не маскируют IRQ захвата |
-| Задачи FreeRTOS | Один отправитель и получатель на MessageBuffer, частичные и пакетные команды, NAK при заполнении, сон без событий, повтор BUSY, порядок сообщений |
-| Сессии USB | Отключение и переподключение, первый пакет новой сессии, отбрасывание устаревших команд, ошибка RX при активной передаче и допустимый пакет нулевой длины |
-| Запуск RTOS | Ожидающий USB IRQ разрешается только после старта ядра при группировке приоритетов HAL; парсер и драйверы не выполняются внутри USB ISR |
-| Драйвер STM32 | 32-битные чтения GPIO, однократная упаковка отсчётов в задаче, минимальный и полный буфер, кольцевое переполнение, оба фронта, посттриггерный счётчик, отмена, приоритет ошибки DMA над одновременным завершением, восстановление |
-| Захват и RTOS | Реальные обработчики драйвера будят задачу через отложенный IRQ; данные DMA проходят через контроллер, приложение, MessageBuffer и USB-порт |
-| Инфраструктура | Ошибка и таймаут процесса, незавершённая упаковка, запрет выдачи устаревшей прошивки, контрольные суммы зависимостей и артефактов, ограничение очистки каталогом out |
-| CubeMX | Парность маркеров USER CODE и неизменность генерируемого текста вне секций |
+| SUMP stream | Commands survive USB packet splits; arguments are little-endian; an unknown long command consumes all five bytes; RESET within an argument is data |
+| Metadata | Complete, bounded replies; ID and capabilities match the device; numeric metadata is big-endian |
+| Command conversion | The 24-bit divider converts to nanoseconds; counts expand without overflow; unsupported bits across the full 32-bit FLAGS value are rejected at RUN |
+| Capture plan | Minimum and maximum sizes, values on both sides of boundaries, post ≤ total, positive period, rejection of multiple trigger channels or nonexistent channel bits |
+| Timer | Actual rate does not exceed the request or device limit; period boundaries, ARR/PSC transition, rejection beyond timer capacity |
+| State machine | Valid transitions, rejection of RUN while active, configuration snapshot at RUN, RESET, recovery from ERROR |
+| Core transport | Copy on acceptance, multiple queued packets, full queue, retried write without losing position, waiting for full completion, no control replies inserted into samples |
+| Cancellation | RESET discards queued packets and retains the active packet; a new capture cannot overwrite memory used by an earlier USB transfer |
+| CDC adapter | Rejected writes retain caller ownership; release follows ZLP completion; nested critical sections restore BASEPRI without masking capture IRQs |
+| FreeRTOS tasks | One writer and reader per MessageBuffer, partial and batched commands, NAK on full queue, sleeping without events, BUSY retries, message order |
+| USB sessions | Disconnect/reconnect, first packet of a new session, stale-command rejection, RX failure during active TX, valid zero-length packet |
+| RTOS startup | A pending USB IRQ is enabled only after kernel startup with HAL priority grouping; parser and drivers run outside the USB ISR |
+| STM32 driver | 32-bit GPIO reads, one-time packing in task context, minimum/full buffer, ring wrap, both edges, post-trigger counter, cancellation, DMA error precedence over simultaneous completion, recovery |
+| Capture and RTOS | Real driver handlers wake the task through a deferred IRQ; DMA data passes through the controller, application, MessageBuffer, and USB port |
+| Infrastructure | Process failure and timeout, incomplete packaging, stale-artifact rejection, dependency/artifact checksums, cleanup confined to out |
+| CubeMX | Paired USER CODE markers and unchanged generated text outside user sections |
 
-Таблица задаёт область проверки; перечень реально выполненных сценариев хранится
-в тестах и отчётах конкретного запуска. Аппаратные риски проверяются отдельно
-по [инструкции для платы](hardware-validation.md).
+This table defines the scope. Tests and individual run reports record the scenarios
+actually executed. Hardware risks require the separate
+[board validation procedure](hardware-validation.md).
 
-## Как писать тест
+## Writing tests
 
-1. Назвать наблюдаемое поведение: входное условие, действие и ожидаемый результат.
-2. Подготовить минимальное состояние, не зависящее от другого теста.
-3. Проверить результат через публичный интерфейс. Проверять побочные эффекты
-   отдельно, когда они являются контрактом: например, DMA не запускается при
-   ошибочных параметрах или OUT не перевооружается без места для целого пакета.
-4. Для числового диапазона выбрать классы допустимых и ошибочных значений,
-   затем проверить границы. Полный перебор уместен для небольших пространств,
-   например байтов команд.
-5. Для исправления ошибки добавить минимальный сценарий, который воспроизводит
-   её условие и проверяет правильный результат.
+1. Name the observable behavior: initial condition, action, and expected result.
+2. Prepare the smallest useful state without relying on another test.
+3. Assert results through the public interface. Check side effects separately when
+   they form part of the contract, such as refusing to start DMA for invalid
+   parameters or not rearming OUT without room for a complete packet.
+4. Partition numeric inputs into valid and invalid classes, then test boundaries.
+   Exhaustive enumeration is appropriate for small spaces such as command bytes.
+5. For a bug fix, add a minimal scenario that reproduces the condition and checks
+   the correct result.
 
-Подмены транспорта и драйвера должны позволять управлять ошибками и завершением
-операции. Они не должны повторять реализацию, которую проверяют. Тесты логики
-прошивки выполняются детерминированно, без сети и ожиданий реального времени.
-Проверки инфраструктуры намеренно используют реальные сроки, когда проверяют
-таймаут и остановку зависшего процесса. У процессов эмуляции есть таймаут
-и ожидаемая строка успешного завершения; одного кода выхода 0 недостаточно.
+Transport and driver test doubles must support controlled failures and completion.
+They must not duplicate the implementation under test. Firmware logic tests are
+deterministic and do not depend on networks or real-time waits. Infrastructure
+tests use real deadlines when checking timeout handling and termination of hung
+processes. Emulator runs require both a timeout and an expected success marker;
+exit code zero alone is insufficient.
 
-## Запуск и отчёты
+## Running tests and reading reports
 
-Полный набор в одинаковом окружении для локальной разработки и GitHub Actions:
+Run the full suite in the same environment used by GitHub Actions:
 
 ```sh
 make docker-build
 ```
 
-Для быстрой проверки с локальными инструментами:
+For faster checks with local tools:
 
 ```sh
 make test
@@ -89,34 +88,34 @@ make qemu-stm32-test QEMU=/path/to/qemu-system-arm-sump-analyzer
 make qemu-rtos-test QEMU=/path/to/qemu-system-arm-sump-analyzer
 ```
 
-Покрытие требует GCC, gcov и gcovr. Отчёт `out/coverage/coverage.html` показывает
-исполненные строки и ветви `core/` и `platform/stm32/usb_cdc_port.c`.
-XML и JSON в той же папке пригодны для автоматической обработки.
-Код двух задач, FreeRTOS, регистровый драйвер, HAL, USB ST и QEMU не входят в эту
-нативную метрику. `qemu-rtos-test` запускает два ELF с настоящим FreeRTOS:
-тест управляемых портов и интеграцию с регистровым драйвером захвата на расширенной
-модели. Отдельный `qemu-stm32-test` подробно проверяет периферию и драйвер.
-Эти проверки не доказывают корректность физического USB или временных характеристик платы.
+Coverage requires GCC, gcov, and gcovr. `out/coverage/coverage.html` reports executed
+lines and branches in `core/` and `platform/stm32/usb_cdc_port.c`. XML and JSON in
+the same directory support automated processing. The two task implementations,
+FreeRTOS, register-level capture driver, HAL, ST USB stack, and QEMU are outside
+this native metric.
 
-`make coverage` завершается ошибкой при покрытии ниже 95% строк или 90% ветвей
-в указанной области. Эти пороги защищают проект от снижения покрытия;
-они не являются универсальным стандартом тестирования. Меняя область измерения
-или пороги, нужно обосновать влияние на проверяемые контракты, а не просто
-добиться успешного этапа CI.
+`qemu-rtos-test` runs two ELF images with real FreeRTOS: controlled-port tests and
+integration with the register-level capture driver on the extended model.
+`qemu-stm32-test` checks peripherals and the driver in greater detail. These tests
+do not establish physical USB correctness or board timing.
 
-Процент покрытия помогает найти непроверенные ветви и уточнить, нужен ли новый
-сценарий или недостижимый код следует удалить. Сам по себе высокий процент
-не доказывает правильность проверок. Не добавляйте искусственные вызовы только
-ради процента и не заменяйте ими проверки данных, ошибок и восстановления.
+`make coverage` fails below 95% line coverage or 90% branch coverage within that
+scope. These thresholds prevent regression; they are not a universal testing
+standard. Changes to thresholds or scope must explain their effect on the tested
+contracts rather than merely make CI pass.
 
-Полный сценарий сохраняет `out/ci/reports/summary.md`, `results.json`, `junit.xml`,
-логи этапов и отчёт покрытия в `out/ci/reports/coverage/`. JUnit показывает итог
-каждого этапа, а не отдельный testcase для каждого C assert. Проверенные файлы
-прошивки появляются в `out/ci/dist/` только после успеха всех этапов.
+Coverage helps identify untested branches and decide whether another scenario is
+needed or unreachable code should be removed. A high percentage alone does not
+establish assertion quality. Do not add artificial calls solely to raise coverage
+or substitute them for checks of data, errors, and recovery.
 
-Достоверный результат относится к определённым исходникам и окружению. Для
-обмена результатами указывайте commit, наличие локальных изменений, версии
-инструментов и сохраняйте отчёты. Метаданные контейнерной сборки находятся
-в `build-info.json`. Снимки [тестового стенда PulseView](pulseview-screenshots.md)
-демонстрируют работу с синтетическими данными и не заменяют протокол испытания
-реальной платы.
+The full pipeline writes `out/ci/reports/summary.md`, `results.json`, `junit.xml`,
+stage logs, and coverage reports under `out/ci/reports/coverage/`. JUnit records
+stage outcomes, not a separate test case for each C assertion. Validated firmware
+appears in `out/ci/dist/` only after every stage succeeds.
+
+Results apply to specific sources and environments. When sharing them, record the
+commit, local modifications, and tool versions, and retain the reports. Container
+build metadata is in `build-info.json`. The
+[PulseView fixture screenshots](pulseview-screenshots.md) demonstrate synthetic
+data and do not replace a physical board test report.

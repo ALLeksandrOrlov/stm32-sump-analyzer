@@ -1,17 +1,30 @@
-# Документация разработчика
+# Developer documentation
 
-- [README проекта](../README.md): быстрый старт, возможности и подключение платы.
-- [CONTRIBUTING](../CONTRIBUTING.md): устройство кода и правила изменений.
-- [Архитектура](architecture.md): зависимости модулей, ECA, задачи FreeRTOS, IRQ и владение памятью.
-- [Имена](naming.md): название устройства, артефакты, модули и единицы величин.
-- [Снимки PulseView](pulseview-screenshots.md): воспроизводимый стенд с тестовым SUMP-устройством.
-- [CubeMX](cubemx.md): точки подключения и сохранение кода при регенерации.
-- [CI/CD](ci-cd.md): контейнер, проверки, отчёты, кеш и артефакты.
-- [Выпуски](releases.md): версии, теги и публикация прошивки.
-- [QEMU](../qemu/README.md): модель периферии и ограничения эмуляции.
-- [FreeRTOS Kernel](../third_party/FreeRTOS-Kernel/README.md): версия, исходники, лицензия и контрольные суммы зависимости.
-- [Проверка на плате](hardware-validation.md): USB, сигналы, триггеры и частоты.
-- [Результаты STM32F4 Discovery, 24.10.2026](hardware-results/stm32f4-discovery-2026-10-24.md): испытания физического USB, захвата PD0 и нагрузки на транспорт.
-- [Триггер от кнопки USER, 24.10.2026](hardware-results/stm32f4-discovery-user-button-2026-10-24.md): нажатие и отпускание PA0 во временной диагностической сборке.
-- [Диагностика](troubleshooting.md): частые ошибки и требования к Docker.
-- [Тестирование](verification.md): контракты, уровни проверки и оценка покрытия.
+The [project README](../README.md) covers the user workflow from installing
+Docker to capturing and decoding a waveform in PulseView.
+
+## Development
+
+- [Contributing](contributing.md): module ownership, readable code and change review.
+- [Building](building.md): optional native builds and individual test targets.
+- [Architecture](architecture.md): dependencies, ECA, FreeRTOS tasks, interrupts and buffer ownership.
+- [Device reference](device-reference.md): input mapping, protocol behavior and supported capture modes.
+- [Naming](naming.md): device identity, artifacts, module names and units.
+- [CubeMX](cubemx.md): integration points and regeneration boundaries.
+- [FreeRTOS Kernel](../third_party/FreeRTOS-Kernel/README.md): pinned sources, license and checksums.
+
+## Verification and releases
+
+- [CI/CD](ci-cd.md): Docker pipeline, test stages, reports, caching and artifacts.
+- [Verification](verification.md): test contracts, coverage and test selection.
+- [QEMU](qemu.md): peripheral model, build instructions and emulation limits.
+- [Hardware validation](hardware-validation.md): USB, signal capture, triggers and timing.
+- [Hardware smoke test](hardware-smoke.md): repeatable SUMP checks through a serial port.
+- [PulseView screenshots](pulseview-screenshots.md): reproduce the screenshots with a synthetic SUMP device.
+- [Releases](releases.md): versions, tags and firmware publication.
+- [Troubleshooting](troubleshooting.md): Docker, test, USB and RTOS diagnostics.
+
+## Hardware results
+
+- [STM32F4 Discovery, 2026-10-24](hardware-results/stm32f4-discovery-2026-10-24.md): physical USB, PD0 capture and transport load.
+- [USER button triggers, 2026-10-24](hardware-results/stm32f4-discovery-user-button-2026-10-24.md): physical rising and falling edges on PA0 in a diagnostic build.

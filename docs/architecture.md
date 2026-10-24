@@ -1,8 +1,9 @@
-# Архитектура
+# Architecture
 
-Зависимости направлены от адаптеров к независимому C11-ядру. В `core/` нет
-заголовков STM32, USB, FreeRTOS, глобальной конфигурации устройства и выделения памяти.
-Приложение можно создать несколько раз с разными драйверами и транспортами.
+Dependencies point from platform adapters toward a standalone C11 core. The
+`core/` directory has no STM32, USB or FreeRTOS headers, global device
+configuration, or dynamic memory allocation. Multiple application instances can
+use different drivers and transports.
 
 ```mermaid
 flowchart LR
@@ -19,190 +20,199 @@ flowchart LR
     EVENTS --> APP
 ```
 
-## Протокол
+## Protocol
 
-`sump_parser_push` принимает байт и выдаёт команду только после её полного
-получения. Команды 0x00…0x7F имеют длину один байт; 0x80…0xFF — пять байтов.
-Параметры читаются побайтно в little-endian. Отдельные байты RESET внутри
-аргумента длинной команды не трактуются как самостоятельные команды. Пять
-нулей, используемых клиентами для ресинхронизации, позволяют выйти из любой
-незавершённой команды. USB-пакет может содержать несколько команд или часть одной.
-Числа в метаданных выдаются в big-endian, ID устройства — `1ALS`.
+`sump_parser_push` accepts one byte and emits a command only when the entire
+command has arrived. Commands `0x00`–`0x7F` are one byte long; commands
+`0x80`–`0xFF` are five bytes long. Parameters are decoded byte by byte in
+little-endian order. A RESET byte inside a long command's argument is treated as
+data. The five zero bytes that clients use for resynchronization finish any
+partial command and reset the parser. A USB packet may contain several commands
+or only part of one. Numeric metadata uses big-endian encoding; the device ID is
+`1ALS`.
 
-## Преобразование команд в параметры захвата
+## Converting commands into capture settings
 
-`analyzer_app` переводит команды SUMP в конфигурацию с физическими единицами:
+`analyzer_app` converts SUMP commands into a configuration with physical units:
 
-- Из 24-битного делителя получает период `sample_period_ns = (divider + 1) * 10`.
-  Единица делителя SUMP соответствует 10 нс.
-- Обе половины COUNTS переводит в число отсчётов по формуле `(encoded + 1) * 4`,
-  выполняя вычисления в `uint32_t`.
-- Хранит все 32 бита FLAGS в `sump_flags` и проверяет их при RUN. Допустимы
-  отключение отсутствующих групп каналов и флаг фильтра как подсказка клиента;
-  остальные биты отклоняются. Подсказка фильтра не меняет отсчёты GPIO.
+- The 24-bit divider becomes `sample_period_ns = (divider + 1) * 10`. Each SUMP
+  divider unit represents 10 ns.
+- Each half of COUNTS becomes a sample count using `(encoded + 1) * 4`, with
+  arithmetic performed in `uint32_t`.
+- All 32 FLAGS bits are retained in `sump_flags` and validated on RUN. Disabling
+  absent channel groups and setting the filter hint are accepted; other bits
+  are rejected. The filter hint does not change GPIO samples.
 
-Контроллер `capture` получает период, число отсчётов и выбор фронта. Он не знает
-команд, делителей, флагов и формата SUMP. Поэтому другой протокол или тест может
-использовать тот же контроллер, задавая параметры непосредственно.
+The `capture` controller receives a period, sample counts and a trigger edge.
+It has no knowledge of SUMP commands, dividers, flags or encoding. Another
+protocol or a test can use the same controller by supplying these parameters
+directly.
 
-## Контроллер захвата: Event–Condition–Action
+## Capture controller: Event–Condition–Action
 
-| Событие | Условие | Действие / новое состояние |
+| Event | Condition | Action / next state |
 | --- | --- | --- |
-| RUN | IDLE, корректные параметры, драйвер стартовал | ARMED с триггером, иначе RUNNING |
-| RUN | IDLE, некорректные параметры / ошибка старта | Остановка, ERROR |
+| RUN | IDLE, valid settings, driver started | ARMED with a trigger; otherwise RUNNING |
+| RUN | IDLE, invalid settings or driver start failure | Stop, ERROR |
 | TRIGGER | ARMED | RUNNING |
-| COMPLETE | ARMED или RUNNING | SENDING |
-| SENT | SENDING, транспорт закончил последнюю порцию | IDLE |
-| ERROR | Любое | Остановка, ERROR |
-| RESET | Любое | Остановка, IDLE |
+| COMPLETE | ARMED or RUNNING | SENDING |
+| SENT | SENDING, transport finished the last packet | IDLE |
+| ERROR | Any state | Stop, ERROR |
+| RESET | Any state | Stop, IDLE |
 
-События, не разрешённые в текущем состоянии, игнорируются. Повторный RUN во время
-захвата или передачи не перезапускает DMA. План захвата копируется в момент RUN;
-настройки последующих команд относятся к следующему запуску. COMPLETE допустим
-сразу из ARMED: ISR может успеть обработать фронт и завершение между двумя poll.
-Если последний пакет уже завершён, следующий RUN принимается даже до очередного
-poll: приложение проверяет `idle()` перед обработкой нового запуска.
+Events that are not allowed in the current state are ignored. A repeated RUN
+during capture or transmission does not restart DMA. The capture plan is copied
+on RUN; subsequent configuration commands apply to the next capture. COMPLETE
+is allowed directly from ARMED because an ISR may process both the trigger and
+completion between two polls. Once the final packet has completed, the next RUN
+is accepted even before another poll: the application checks `idle()` before
+handling the new request.
 
-Конфигурация хранит период в наносекундах и количество отсчётов в `uint32_t`.
-Нулевой период, нулевые размеры, размер выше буфера, post > total и выбор
-нескольких каналов триггера отклоняются до старта драйвера. Маска триггера
-сохраняет все 32 бита входной команды; биты вне существующих каналов 0…7
-также приводят к отказу при RUN. Таймерный план
-рассчитывается через 64-битную арифметику без промежуточного деления частот.
-Если период не помещается в произведение двух 16-битных делителей PSC/ARR,
-план отклоняется. Округление периода вверх не позволяет превысить ни запрошенную
-частоту, ни заявленный максимум устройства.
+The configuration stores the period in nanoseconds and sample counts in
+`uint32_t`. A zero period, zero counts, a count larger than the buffer, post-trigger
+count greater than total count, or multiple trigger channels are rejected before
+the driver starts. The trigger mask retains all 32 bits of the incoming command;
+bits outside channels 0–7 also cause RUN to fail. The timer plan uses 64-bit
+arithmetic without intermediate frequency division. A period that cannot fit
+the product of the two 16-bit PSC/ARR divisors is rejected. Rounding the period
+up ensures the actual rate exceeds neither the requested rate nor the device's
+advertised maximum.
 
-## Передача и владение памятью
+## Transmission and memory ownership
 
-Драйвер владеет одним буфером 112 КиБ, доступным DMA: 28 672 отсчёта по 32 бита.
-Регистр GPIO IDR читается словами, как требует RM0090 §8.4.5. После остановки DMA
-драйвер в контексте задачи один раз упаковывает младшие восемь бит каждого слова
-в начало того же буфера; дополнительная память не выделяется. Упаковка сохраняет
-индексы кольца и выполняется до возврата события COMPLETE. Готовые 28 КиБ не
-меняются до следующего RUN. Приложение читает кольцо от последнего записанного байта назад,
-порциями до 64 байт. Один вызов `analyzer_app_poll()` ставит в очередь не больше
-одного пакета.
+The driver owns a single 112 KiB buffer accessible by DMA: 28,672 samples stored
+as 32-bit words. GPIO IDR is read using word accesses, as required by RM0090
+§8.4.5. After DMA stops, the driver runs once in task context to pack the low
+eight bits of each word into the start of the same buffer. No additional memory
+is allocated. Packing preserves ring indices and finishes before the driver
+returns COMPLETE. The resulting 28 KiB of sample data stays unchanged until the
+next RUN. The application reads the ring backward from the last recorded byte
+in packets of up to 64 bytes. Each `analyzer_app_poll()` call queues at most one
+packet.
 
-Контракт `analyzer_transport_t` отделяет приложение от способа передачи:
+The `analyzer_transport_t` contract separates the application from the transport:
 
-- `write()` не ждёт USB и копирует весь пакет до возврата `true`.
-  При `false` не принято ни одного байта; приложение сохраняет позицию для повтора.
-- `idle()` возвращает `true`, когда нет ни пакетов в очереди, ни активной передачи.
-  `samples_sent` считает принятые байты, а переход SENDING → IDLE дополнительно
-  требует полного завершения транспорта.
-- `cancel()` делает пакеты в очереди недействительными. Уже активный пакет может
-  завершиться; транспорт обязан сохранить его память до освобождения USB.
+- `write()` does not wait for USB. It copies the entire packet before returning
+  `true`. A `false` result means no bytes were accepted; the application retains
+  its position for a retry.
+- `idle()` returns `true` when there are no queued packets or active transfers.
+  `samples_sent` counts accepted bytes; the SENDING → IDLE transition also
+  requires the transport to finish transmitting them.
+- `cancel()` invalidates queued packets. An active packet may still complete;
+  the transport must retain its memory until USB releases it.
 
-Приложение может сразу переиспользовать `app.tx` после успешного `write()`.
-Задача TX читает сообщение из MessageBuffer в собственный устойчивый буфер
-и передаёт его USB CDC. Только этот буфер заимствуется USB; задача не меняет его
-до завершения, включая завершающий пакет нулевой длины (ZLP).
+The application may reuse `app.tx` immediately after a successful `write()`. The
+TX task receives a MessageBuffer message into its own persistent packet buffer
+and submits that buffer to USB CDC. USB borrows only this buffer. The task does
+not modify it until transmission completes, including any final zero-length
+packet (ZLP).
 
-RESET останавливает захват, сбрасывает парсер и конфигурацию, отменяет ожидающий
-ответ и очередь вывода. Клиент должен отбросить хвост уже начатого пакета старого
-захвата. Запросы ID/META во время выдачи отсчётов ждут полного завершения захвата,
-чтобы служебный ответ не попал внутрь данных.
+RESET stops capture, resets the parser and configuration, cancels a pending
+reply, and invalidates queued output. The client must discard any remaining
+bytes from an already active packet of the previous capture. ID/META requests
+received while samples are being sent wait for the capture transfer to finish,
+so a command reply cannot appear inside sample data.
 
-## Задачи и очереди FreeRTOS
+## FreeRTOS tasks and queues
 
-| Задача | Приоритет | Стек, 32-битных слов | Ответственность |
+| Task | Priority | Stack, 32-bit words | Responsibility |
 | --- | --- | --- | --- |
-| `analyzer` | 2 | 768 | Парсер, команды, конфигурация, контроллер захвата, подготовка выходных пакетов |
-| `usb-tx` | 3 | 512 | Получение TX-сообщений, отправка USB, ожидание завершения и освобождение памяти |
-| Idle | 0 | 256 | Служебная задача ядра |
+| `analyzer` | 2 | 768 | Parser, commands, configuration, capture controller and output packet preparation |
+| `usb-tx` | 3 | 512 | Receive TX messages, submit them to USB, wait for completion and release memory |
+| Idle | 0 | 256 | Kernel idle task |
 
-Задачи, стеки, управляющие структуры и MessageBuffer создаются статически.
-Динамическое выделение памяти FreeRTOS отключено. Это не распространяется
-на библиотеку USB ST, выделяющую состояние CDC при инициализации класса.
-Используется неизменённый [FreeRTOS Kernel V11.3.1](../third_party/FreeRTOS-Kernel/README.md)
-с портом GCC ARM_CM4F; контрольные суммы выбранных исходников проверяются в CI.
+Tasks, stacks, control structures and MessageBuffers are allocated statically.
+FreeRTOS dynamic allocation is disabled. This does not apply to the ST USB
+library, which allocates CDC state during class initialization. The project uses
+the unmodified [FreeRTOS Kernel V11.3.1](../third_party/FreeRTOS-Kernel/README.md)
+with the GCC ARM_CM4F port; CI verifies checksums of the selected source files.
 
-RX MessageBuffer имеет одного отправителя — USB IRQ — и одного получателя —
-задачу приложения. У TX MessageBuffer отправитель — задача приложения,
-получатель — задача TX. Каждый буфер вмещает четыре полных пакета по 64 байта
-вместе со служебными полями; коротких сообщений может поместиться больше.
-Задача TX дополнительно удерживает один пакет вне очереди.
+The RX MessageBuffer has one producer, the USB IRQ, and one consumer, the
+application task. The TX MessageBuffer has the application task as its producer
+and the TX task as its consumer. Each buffer holds four full 64-byte packets
+with their message headers; more short messages may fit. The TX task also holds
+one packet outside the queue.
 
-OUT перевооружается только при наличии места под целый максимальный пакет.
-Если места нет, USB отвечает NAK; уже принятые байты команды не теряются. Парсер получает непрерывный поток, независимо от
-границ USB-пакетов. Пока служебный ответ не принят TX-очередью, приложение
-не потребляет следующий байт команды.
+The OUT endpoint is rearmed only when there is room for an entire maximum-sized
+packet. If there is no room, USB responds with NAK, preserving command bytes
+already accepted. The parser receives a continuous stream regardless of USB
+packet boundaries. Until the TX queue accepts a command reply, the application
+does not consume the next command byte.
 
-Задачи спят на уведомлениях, когда не могут продвинуться. При отказе USB принять
-пакет задача TX повторяет попытку через один tick, не выполняя активное ожидание.
-Оповещения используют индекс 1; индекс 0 зарезервирован механизмом MessageBuffer.
-Событие между проверкой состояния и блокировкой сохраняется в счётчике уведомления.
-Когда все рабочие задачи заблокированы, Idle hook выполняет WFI до прерывания.
+Tasks block on notifications when they cannot make progress. If USB refuses a
+packet, the TX task retries after one tick without busy-waiting. Notifications
+use index 1; MessageBuffer reserves index 0. An event arriving between the state
+check and the wait is retained in the notification counter. When all worker tasks
+are blocked, the Idle hook executes WFI until an interrupt arrives.
 
-## Подключение, отмена и ошибки RX
+## Connection changes, cancellation and RX errors
 
-Сообщения несут номера сессии и поколения. Отмена увеличивает поколение TX;
-задача TX сама удаляет недействительные сообщения. Живые MessageBuffer никогда
-не сбрасываются из чужой задачи или ISR, поэтому сохраняется правило одного
-отправителя и одного получателя.
+Messages carry session and generation numbers. Cancellation increments the TX
+generation; the TX task discards invalid messages itself. A live MessageBuffer
+is never reset from another task or an ISR, preserving its single-producer,
+single-consumer ownership.
 
-При отключении, переподключении или повреждённом RX-пакете приложение получает
-новую сессию, сбрасывает парсер и игнорирует сообщения предыдущей сессии.
-Первый пакет нового подключения сохраняется, даже если пришёл до обработки
-уведомления задачей приложения.
+A disconnect, reconnect or malformed RX packet starts a new application session.
+The application resets its parser and ignores messages from the previous
+session. The first packet of a new connection is retained even if it arrives
+before the application task handles the notification.
 
-Физическое подключение имеет отдельный счётчик. Только закрытие endpoint при
-отключении или нормальное завершение передачи освобождает заимствованную USB
-память. Некорректная длина RX сбрасывает протокол, но не освобождает активный
-TX-буфер и не считается физическим отключением. Пакет нулевой длины допустим.
+Physical connections have a separate counter. Only endpoint closure during
+disconnect or normal transfer completion releases memory borrowed by USB. An
+invalid RX length resets the protocol but does not release the active TX buffer
+or count as a physical disconnect. A zero-length packet is valid.
 
-## Прерывания и запуск
+## Interrupts and startup
 
-В ISR захвата разрешены только работа с периферией, остановка и публикация
-события. В них нет USB, парсера и разворота буфера. DMA EN ожидается с ограничением,
-а не бесконечно. Ошибка DMA имеет приоритет над одновременным завершением
-посттриггерного счётчика: повреждённый захват не передаётся клиенту.
-Модель одного контроллера предполагает исключительное владение TIM1/TIM8,
-DMA2 Stream 5 и линиями EXTI0…7.
+Capture ISRs may only access peripherals, stop capture and publish events. They
+do not access USB, parse commands or reverse the sample buffer. Waiting for DMA
+EN to clear is bounded. A DMA error takes precedence over simultaneous completion
+of the post-trigger counter, so a damaged capture is not sent to the client. The
+single-controller design assumes exclusive ownership of TIM1/TIM8, DMA2 Stream 5
+and EXTI lines 0–7.
 
-| Прерывание | Числовой приоритет NVIC | Работа с FreeRTOS |
+| Interrupt | Numeric NVIC priority | FreeRTOS interaction |
 | --- | --- | --- |
-| EXTI, DMA2 Stream 5, TIM8 | 1 | Не вызывает API ядра; выставляет событие и pending для отложенного IRQ |
-| TIM6_DAC, программное уведомление о захвате | 5 | Уведомляет задачу приложения через FromISR |
-| OTG_FS | 6 | Копирует RX и уведомляет задачи через FromISR |
-| SysTick / PendSV | 15 | Tick и переключение контекста ядра |
+| EXTI, DMA2 Stream 5, TIM8 | 1 | No kernel API calls; publish an event and pend the deferred IRQ |
+| TIM6_DAC, software capture notification | 5 | Notify the application task through FromISR |
+| OTG_FS | 6 | Copy RX data and notify tasks through FromISR |
+| SysTick / PendSV | 15 | Kernel tick and context switching |
 
-Меньшее число NVIC означает более высокий приоритет. Порог системных вызовов — 5.
-Критические секции FreeRTOS используют BASEPRI: они исключают USB и отложенное
-уведомление, оставляя IRQ захвата доступными. TIM6_DAC используется как программное
-прерывание и не должен назначаться другому периферийному модулю. Модуль
-`platform/stm32/capture_task_events` связывает эти уровни: ISR захвата только
-выставляет pending TIM6_DAC, а его обработчик уведомляет задачу. Сам таймер TIM6
-не запускается. Плата подключает этот переходник после создания задач и до захвата.
+A lower NVIC number means higher priority. The system-call priority threshold
+is 5. FreeRTOS critical sections use BASEPRI to mask USB and deferred
+notifications while keeping capture IRQs available. TIM6_DAC is used as a
+software interrupt and must not be assigned to another peripheral. The
+`platform/stm32/capture_task_events` module connects these priority levels:
+capture ISRs only pend TIM6_DAC, whose handler notifies the task. Timer TIM6
+itself is not started. Board initialization connects this adapter after task
+creation and before capture begins.
 
-Порядок запуска сохраняет работоспособность HAL и ограничения ядра:
+Startup preserves HAL timing and the kernel's interrupt requirements:
 
-1. Плата подготавливает драйверы, статические очереди и задачи.
-2. После создания задач восстанавливается исходный BASEPRI, чтобы SysTick HAL
-   продолжал работать во время задержек аппаратной инициализации USB.
-3. MSP задаёт OTG_FS приоритет 6 и оставляет USB IRQ выключенным. Накопленное
-   событие подключения не должно вызвать FreeRTOS API до запуска планировщика.
-4. `vTaskStartScheduler()` запускает задачи; первым действием задача TX вызывает
-   `activate()` и включает подготовленный USB IRQ.
+1. The board initializes drivers, static queues and tasks.
+2. After task creation, the original BASEPRI is restored so the HAL SysTick keeps
+   running during USB hardware initialization delays.
+3. MSP sets OTG_FS to priority 6 and leaves the USB IRQ disabled. A pending
+   connection event must not invoke FreeRTOS APIs before the scheduler starts.
+4. `vTaskStartScheduler()` starts the tasks. The TX task first calls `activate()`
+   to enable the prepared USB IRQ.
 
-SVC и PendSV принадлежат порту FreeRTOS. SysTick вызывает HAL и передаёт tick ядру
-только после старта планировщика. Точки подключения остаются внутри USER CODE;
-подробности приведены в [правилах CubeMX](cubemx.md).
+SVC and PendSV belong to the FreeRTOS port. SysTick services HAL and forwards the
+tick to the kernel only after the scheduler starts. Integration points remain
+inside USER CODE sections; see the [CubeMX rules](cubemx.md).
 
-## Границы ответственности
+## Module responsibilities
 
-Протокол задаёт формат команды, приложение преобразует и проверяет её параметры,
-контроллер проверяет план и допустимость перехода, драйвер управляет периферией.
-Обнаруженная ошибка запуска или DMA
-переводит контроллер в ERROR; восстановление начинается с RESET. Транспорт
-отвечает за завершение передачи, поэтому приложение не предполагает, что
-успешный `write()` означает немедленную доставку.
+The protocol defines command encoding. The application converts and validates
+command parameters. The controller checks the capture plan and state
+transitions. The driver controls peripherals. A startup or DMA error moves the
+controller to ERROR; recovery begins with RESET. The transport owns completion,
+so the application does not assume that a successful `write()` means immediate
+delivery.
 
-Реализация STM32 поддерживает фронтовой триггер EXTI на одном выбранном канале.
-Маски с несколькими или отсутствующими каналами отклоняются при построении плана.
-Уровневое сравнение и
-многоступенчатый триггер требуют отдельной реализации и проверки всего пути:
-команда → план → периферия → результат. Пределы модели и порядок аппаратной
-проверки описаны в [методике тестирования](verification.md).
+The STM32 implementation supports an EXTI edge trigger on one selected channel.
+Masks selecting multiple channels or unavailable channels are rejected when the
+plan is built. Level comparison and multistage triggers require their own
+implementation and validation of the entire path: command → plan → peripheral →
+result. Model limitations and hardware checks are described in the
+[verification guide](verification.md).

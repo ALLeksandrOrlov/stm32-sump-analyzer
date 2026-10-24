@@ -1,124 +1,102 @@
-# stm32-sump-analyzer
+# STM32 SUMP Analyzer
 
-8-канальный логический анализатор STM32F407 для PulseView.
+An 8-channel USB logic analyzer for STM32F407. This quick start takes an
+STM32F4 Discovery from a Docker build to a waveform in PulseView.
 
-[![Firmware CI/CD](https://github.com/ALLeksandrOrlov/stm32-sump-analyzer/actions/workflows/build.yml/badge.svg)](https://github.com/ALLeksandrOrlov/stm32-sump-analyzer/actions/workflows/build.yml)
+## Requirements
 
-Прошивка использует SUMP через USB CDC, захватывает PD0…PD7 через TIM1 + DMA2
-и возвращает отсчёты от новых к старым. Код протокола, управление захватом,
-прикладная логика и работа с STM32 разделены. Задача FreeRTOS обрабатывает команды
-и захват, отдельная задача передаёт данные USB. Между ними используются
-MessageBuffer с копированием пакетов. Независимое C11-ядро не зависит от HAL
-и FreeRTOS. Задачи, стеки и очереди выделены статически; библиотека USB ST
-выделяет память при инициализации класса CDC.
+- **Docker** with Linux containers and Buildx.
+- **PulseView 0.4.2**.
+- **Hardware:** STM32F4 Discovery, two USB data cables and 3.3 V signals to
+  capture. The board has an onboard programmer and a separate USB OTG FS
+  connector for the analyzer.
 
-## Быстрый старт: сборка и тесты в Docker
+## 1. Install and start Docker
 
-Требуются GNU make и работающий Docker с Buildx:
-
-```sh
-make docker-build
-```
-
-Команда готовит контейнер с ARM-компилятором и расширенным QEMU, запускает тесты
-и собирает прошивку. ARM toolchain и QEMU на хосте не требуются.
-
-- Проверенные ELF/HEX/BIN/MAP, метаданные и SHA256: `out/ci/dist/`.
-- Логи, JUnit и сводка: `out/ci/reports/`.
-- `make docker-test` запускает тот же полный сценарий.
-- Первая сборка QEMU занимает несколько минут; инструменты кешируются,
-  сами тесты выполняются заново при каждом запуске.
-
-GitHub Actions запускает этот же контейнер на PR, push и вручную. По тегам
-`vMAJOR.MINOR.PATCH` после проверок публикуются файлы GitHub Release;
-`vMAJOR.MINOR.PATCH-rc.1` создаёт prerelease. См. [CI/CD](docs/ci-cd.md)
-и [выпуск версии](docs/releases.md).
-
-Подготовка Docker и разбор ошибок описаны в [диагностике](docs/troubleshooting.md).
-
-## Локальная сборка
-
-Требуются GNU make и GNU Arm Embedded GCC с newlib. CubeMX и IDE для сборки не нужны.
+Follow the Docker installation guide for
+[macOS](https://docs.docker.com/desktop/setup/install/mac-install/),
+[Windows](https://docs.docker.com/desktop/setup/install/windows-install/) or
+[Linux](https://docs.docker.com/engine/install/). Start Docker and check:
 
 ```sh
-make -j4
-make test
-make test-sanitize
-make coverage                       # GCC, gcov и gcovr
-make qemu-test                      # обычный qemu-system-arm
-make qemu-stm32-test QEMU=/path/to/patched/qemu-system-arm
-make qemu-rtos-test QEMU=/path/to/patched/qemu-system-arm
+docker version
 ```
 
-Прошивка: `out/firmware/stm32_sump_analyzer.{elf,hex,bin,map}`. Компилятор можно указать так:
+The output must include both **Client** and **Server**. On Windows, use Linux
+containers. The compiler, build tools and test dependencies run inside Docker.
+
+## 2. Build the firmware
+
+[Download the project ZIP](https://github.com/ALLeksandrOrlov/stm32-sump-analyzer/archive/refs/heads/main.zip),
+extract it, and open a terminal in the folder containing `Dockerfile`. Run:
 
 ```sh
-make CROSS_COMPILE=/path/to/toolchain/bin/arm-none-eabi-
+docker build --target artifacts --output type=local,dest=out/docker .
 ```
 
-GNU make выбирает `GNUmakefile`. Генерируемый CubeMX `Makefile`
-не хранится в репозитории и не используется для сборки. Артефакты находятся в `out/`.
+The first build takes several minutes. Docker builds and checks the firmware,
+then saves the ready-to-flash files in `out/docker/firmware/`.
+No Git, Make, Python or ARM toolchain installation is needed on your computer.
 
-## Архитектура
+## 3. Flash and connect the board
 
-| Модуль | Ответственность |
-| --- | --- |
-| `core/sump_protocol.*` | Потоковый разбор SUMP, ID и метаданные; без HAL и USB |
-| `core/capture.*` | Период в наносекундах, расчёт таймеров, ECA-автомат, порядок отсчётов; без SUMP |
-| `core/analyzer_app.*` | Преобразование команд SUMP в параметры захвата, проверка флагов, неблокирующая отправка |
-| `platform/stm32/capture_stm32.*` | GPIO, EXTI, TIM1/TIM8, DMA и короткие ISR |
-| `platform/freertos/` | Задачи приложения и USB TX, MessageBuffer, уведомления и конфигурация ядра RTOS |
-| `platform/stm32/usb_cdc_port.*` | Доступ задачи к USB CDC, завершение передачи и включение IRQ после старта планировщика |
-| `platform/stm32/capture_task_events.*` | Передача событий захвата из высокоприоритетного ISR в задачу через отложенный IRQ |
-| `platform/stm32/analyzer_board.*` | Подключение компонентов и запуск планировщика |
-| `third_party/FreeRTOS-Kernel/` | Закреплённое ядро V11.3.1, порт Cortex-M4F и контрольные суммы исходников |
-| `Src/`, `Inc/` | CubeMX и точки подключения в секциях USER CODE |
-| `qemu/` | Дополнительная модель периферии для QEMU и инструкция сборки |
-| `tests/` | Тесты ядра, адаптера CDC, STM32-драйвера и обмена между задачами |
+Using your programmer's utility, flash
+`out/docker/firmware/stm32_sump_analyzer.bin` at **`0x08000000`**, then reset
+and run the board. The same directory also contains `.hex` and `.elf` files.
 
-Подробности: [архитектура и контракты](docs/architecture.md),
-[сохранность при генерации CubeMX](docs/cubemx.md),
-[модель QEMU](qemu/README.md), [проверка на плате](docs/hardware-validation.md),
-[методика тестирования](docs/verification.md).
+Connect the board's **USB OTG FS** port to the computer with a data cable.
+On STM32F4 Discovery this is **CN5**, separate from the programmer's CN1.
+A USB CDC serial port should appear.
 
-Для разработки: [CONTRIBUTING](CONTRIBUTING.md),
-[оглавление документации](docs/README.md).
+## 4. Select the analyzer in PulseView
 
-## Возможности и ограничения
+Open PulseView 0.4.2 and choose **Connect to Device** from the device selector:
 
-- 8 каналов, PD0…PD7, до 28 672 отсчётов; запрошенный размер проверяется до DMA.
-  DMA читает IDR словами в буфер 112 КиБ, задача упаковывает результат в 28 КиБ.
-- Верхняя заявленная частота — 20 МГц. При TIM1=168 МГц максимальная разрешённая
-  частота округляется вниз до 18,667 МГц. Фактический устойчивый предел DMA/GPIO
-  необходимо измерять на плате.
-- Захват без триггера завершается по DMA Transfer Complete.
-- Триггер по нарастающему или спадающему фронту одного выбранного канала EXTI.
-  Маски с несколькими каналами или каналами вне 0…7 отклоняются. Многобитное
-  сравнение уровней и многоступенчатый триггер не поддерживаются.
-- Посттриггерные отсчёты считает TIM8 от обновлений TIM1; остановка выполняется
-  в ISR, поэтому положение триггера зависит от задержки прерываний.
-- RLE, DDR, внешний clock и отключение единственной группы не поддержаны:
-  такой RUN из IDLE переводит контроллер в ERROR до запуска DMA. RESET восстанавливает
-  конфигурацию по умолчанию. SUMP не имеет отдельного ответа об ошибке RUN.
-- Бит FPGA-фильтра не меняет отсчёты GPIO: цифровая фильтрация не реализована.
-  Драйвер OLS в libsigrok включает этот бит автоматически.
-- Неизвестные длинные команды потребляются целиком и игнорируются, чтобы не
-  нарушать границы следующей команды.
+1. Driver: **Openbench Logic Sniffer & SUMP compatibles (ols)**.
+2. Interface: **Serial Port**.
+3. Port: your board's USB CDC port, such as `COM5` on Windows,
+   `/dev/ttyACM0` on Linux or `/dev/cu.usbmodem…` on macOS.
+4. Click **Scan for devices using driver above**.
+5. Select **STM32 SUMP Analyzer with 8 channels** and click **OK**.
 
-## Подключение к PulseView
+![Selecting the SUMP driver and discovering STM32 SUMP Analyzer in PulseView](docs/images/pulseview-connect.jpg)
 
-1. Прошить `.bin` по адресу `0x08000000` или использовать `.elf` со своим
-   отладчиком. Конфигурация платы предполагает HSE 8 МГц, SYSCLK 168 МГц.
-2. Подключить USB FS и выбрать SUMP-совместимый драйвер и порт USB CDC.
-   Имя USB-устройства и обнаруженного анализатора: **STM32 SUMP Analyzer**.
-   PA9 должен получать VBUS от этого разъёма для обнаружения подключения кабеля.
-3. Выбрать до 28 672 отсчётов, восемь каналов и поддерживаемые настройки.
-4. Сначала проверить захват без триггера, затем одиночный фронт.
+The screenshot uses a demo serial port. Select your board's port, not the
+`/tmp/stm32-sump-analyzer` path shown in the example or the programmer's serial port.
 
-![Обнаружение STM32 SUMP Analyzer в PulseView через тестовый serial-порт](docs/images/pulseview-connect.jpg)
-![Декодирование синтетической транзакции I2C в PulseView](docs/images/pulseview-i2c.jpg)
+## 5. Connect a signal and capture a waveform
 
-Снимки PulseView с [тестовым SUMP-устройством](docs/pulseview-screenshots.md)
-и синтетическим сигналом I²C. Имя устройства получено из метаданных прошивки.
-QEMU проверяет цифровую модель;
-USB/PulseView, точность времени и электрические свойства проверяются на плате.
+Channels **0–7** correspond to **PD0–PD7**. Connect the signal source's ground
+to the board's **GND** and use **3.3 V logic signals**.
+
+For a first capture, connect an active signal to **PD0**, choose **1 MHz** and
+**1 k samples**, leave the trigger disabled, then click **Run**. Keep the sample
+count at or below **28,672** and leave RLE, DDR and external clock disabled.
+Zoom into the trace with the mouse wheel to inspect its edges.
+
+A disconnected or constant input produces a flat trace. For an intermittent
+signal, enable a rising or falling edge trigger on one channel, click **Run**,
+and then generate the signal. The capture waits until that edge arrives.
+
+## 6. Decode a bus: I²C example
+
+To capture an active 3.3 V I²C bus, connect:
+
+| Bus signal | Analyzer pin | PulseView channel |
+| --- | --- | --- |
+| SCL | PD0 | 0 |
+| SDA | PD1 | 1 |
+| GND | GND | — |
+
+For a 100 kHz bus, start with **1 MHz** sampling and **1 k samples**. For an
+intermittent bus, select a falling edge trigger on channel 1, click **Run**,
+then generate a transaction. Press **D**, find **I²C** and double-click it to add the decoder.
+In its settings, assign **SCL → 0** and **SDA → 1**. Zoom in to see the clock,
+data, address, data bytes and acknowledgements together.
+
+![I2C waveforms and decoded address, data bytes and acknowledgements in PulseView](docs/images/pulseview-i2c.jpg)
+
+This example uses a synthetic transaction to address `0x50`, writing `0x10`
+and `0x2A`. Your decoded values come from the connected bus.
+
+[Developer documentation](docs/README.md)
