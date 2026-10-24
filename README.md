@@ -78,9 +78,10 @@ A disconnected or constant input produces a flat trace. For an intermittent
 signal, enable a rising or falling edge trigger on one channel, click **Run**,
 and then generate the signal. The capture waits until that edge arrives.
 
-## 6. Decode a bus: I²C example
+## Optional example: decode an I²C bus
 
-To capture an active 3.3 V I²C bus, connect:
+If you have an active 3.3 V I²C bus, you can also decode its transactions in
+PulseView. Connect:
 
 | Bus signal | Analyzer pin | PulseView channel |
 | --- | --- | --- |
