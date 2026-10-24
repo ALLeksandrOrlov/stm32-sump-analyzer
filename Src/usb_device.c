@@ -28,7 +28,9 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN Includes */
-
+#include "usb_cdc_port.h"
+/* Register the adapter's class table through the generated initialization. */
+#define USBD_CDC (*usb_cdc_port_class())
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN PV */
@@ -87,7 +89,7 @@ void MX_USB_DEVICE_Init(void)
   }
 
   /* USER CODE BEGIN USB_DEVICE_Init_PostTreatment */
-  
+#undef USBD_CDC
   /* USER CODE END USB_DEVICE_Init_PostTreatment */
 }
 

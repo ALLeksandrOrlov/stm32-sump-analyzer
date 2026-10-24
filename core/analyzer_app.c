@@ -21,13 +21,21 @@ void analyzer_app_init(analyzer_app_t *app, capture_driver_t driver,
 void analyzer_app_reset(analyzer_app_t *app)
 {
     capture_dispatch(&app->capture, CAPTURE_EVENT_RESET, NULL);
+    app->transport.cancel(app->transport.context);
     sump_parser_reset(&app->parser);
     capture_config_default(&app->config);
     app->sump_flags = UNUSED_CHANNEL_GROUPS;
     app->reply_length = 0;
     app->samples_sent = 0;
-    app->tx_contains_samples = false;
-    /* The transport may still borrow tx. Its bytes and ownership stay valid. */
+}
+
+static void finish_capture_if_idle(analyzer_app_t *app)
+{
+    if (app->capture.state == CAPTURE_SENDING &&
+        app->samples_sent == app->capture.plan.config.samples &&
+        app->transport.idle(app->transport.context)) {
+        capture_dispatch(&app->capture, CAPTURE_EVENT_SENT, NULL);
+    }
 }
 
 static void apply_command(analyzer_app_t *app, const sump_command_t *command)
@@ -37,6 +45,9 @@ static void apply_command(analyzer_app_t *app, const sump_command_t *command)
         analyzer_app_reset(app);
         break;
     case SUMP_RUN: {
+        /* A host can send RUN as soon as it receives the final bytes, before
+         * the application has polled the transport's completion notification. */
+        finish_capture_if_idle(app);
         /* libsigrok requests its FPGA filter below 100 MHz. Raw GPIO samples
          * cannot implement that filter, so this flag is accepted as a hint.
          * Disabling absent channel groups is safe; all other flags are errors.
@@ -96,50 +107,30 @@ bool analyzer_app_receive(analyzer_app_t *app, uint8_t byte)
     return true;
 }
 
-static void finish_transfer(analyzer_app_t *app)
-{
-    if (!app->tx_in_flight) {
-        return;
-    }
-    app->tx_in_flight = false;
-    if (app->tx_contains_samples && app->samples_sent == app->capture.plan.config.samples) {
-        capture_dispatch(&app->capture, CAPTURE_EVENT_SENT, NULL);
-    }
-    app->tx_contains_samples = false;
-}
-
 void analyzer_app_poll(analyzer_app_t *app)
 {
     capture_poll(&app->capture);
-    if (!app->transport.ready(app->transport.context)) {
-        return;
-    }
-    finish_transfer(app);
-
-    size_t length;
-    bool samples = app->capture.state == CAPTURE_SENDING;
+    finish_capture_if_idle(app);
     /* A capture is one continuous response. Control replies wait until its
-     * last sample packet has completed, including asynchronous transport I/O. */
-    if (samples) {
-        length = capture_read_reverse(&app->capture, app->samples_sent, app->tx, sizeof(app->tx));
-        if (!length) {
+     * final packet completes, even after every sample has entered the queue. */
+    if (app->capture.state == CAPTURE_SENDING) {
+        if (app->samples_sent == app->capture.plan.config.samples) {
+            return;
+        }
+        size_t length = capture_read_reverse(
+            &app->capture, app->samples_sent, app->tx, sizeof(app->tx));
+        if (length == 0) {
             capture_dispatch(&app->capture, CAPTURE_EVENT_ERROR, NULL);
             return;
         }
-    } else if (app->reply_length) {
-        length = app->reply_length;
-        memcpy(app->tx, app->reply, length);
-    } else {
+        if (app->transport.write(app->transport.context, app->tx, length)) {
+            app->samples_sent += (uint32_t)length;
+        }
+        /* One packet per poll bounds work independently of queue depth. */
         return;
     }
-
-    if (app->transport.write(app->transport.context, app->tx, length)) {
-        app->tx_in_flight = true;
-        app->tx_contains_samples = samples;
-        if (samples) {
-            app->samples_sent += (uint32_t)length;
-        } else {
-            app->reply_length = 0;
-        }
+    if (app->reply_length != 0 &&
+        app->transport.write(app->transport.context, app->reply, app->reply_length)) {
+        app->reply_length = 0;
     }
 }

@@ -23,7 +23,13 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "capture_task_events.h"
 #include "capture_stm32.h"
+#include "freertos_support.h"
+/* FreeRTOS supplies the naked exception handlers. Keep generated empty
+ * functions under distinct names so no C wrapper alters their stack frame. */
+#define SVC_Handler cubemx_unused_svc_handler
+#define PendSV_Handler cubemx_unused_pendsv_handler
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -187,7 +193,7 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
-
+  freertos_systick_handler();
   /* USER CODE END SysTick_IRQn 1 */
 }
 
@@ -213,6 +219,9 @@ void OTG_FS_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+#undef SVC_Handler
+#undef PendSV_Handler
+
 void EXTI0_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI1_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI2_IRQHandler(void) { capture_stm32_exti_irq(); }
@@ -221,5 +230,10 @@ void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
 void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_tim8_update_irq(); }
 void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma2_stream5_irq(); }
+
+void TIM6_DAC_IRQHandler(void)
+{
+    capture_task_events_irq();
+}
 /* USER CODE END 1 */
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/

@@ -26,7 +26,9 @@ void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
 void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
 void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_tim8_update_irq(); }
 void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma2_stream5_irq(); }
-static bool ready(void *ctx) { (void)ctx; return true; }
+static bool idle(void *ctx) { (void)ctx; return true; }
+/* The memory transport delivers synchronously, so cancellation has no queue. */
+static void cancel(void *ctx) { (void)ctx; }
 static bool send_bytes(void *ctx, const uint8_t *data, size_t size)
 {
     (void)ctx;
@@ -212,7 +214,7 @@ int main(void)
     assert(FIXTURE[FIXTURE_ID] == 0x534c4131);
     capture_stm32_init();
     analyzer_app_init(&app, capture_stm32_driver(),
-                      (analyzer_transport_t){NULL, ready, send_bytes},
+                      (analyzer_transport_t){.context = NULL, .write = send_bytes, .idle = idle, .cancel = cancel},
                       capture_stm32_timer_clock_hz());
     test_gpio();
     test_untriggered(4);

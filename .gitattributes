@@ -1,0 +1,4 @@
+# CubeMX sources use CRLF. Retain their existing line endings and still check
+# added lines for ordinary whitespace errors.
+/Src/* whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+/Inc/* whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

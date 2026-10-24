@@ -5,6 +5,16 @@ extern void initialise_monitor_handles(void);
 extern int main(void);
 void Reset_Handler(void);
 static void fault(void) { for (;;) {} }
+#ifdef FREERTOS_QEMU_TEST
+#include "freertos_support.h"
+extern void SVC_Handler(void), PendSV_Handler(void);
+#endif
+#ifdef ANALYZER_RUNTIME_TEST
+extern void ANALYZER_TEST_IRQHandler(void);
+#endif
+#ifdef RTOS_CAPTURE_TEST
+extern void TIM6_DAC_IRQHandler(void);
+#endif
 #ifdef STM32_CAPTURE_TEST
 extern void EXTI0_IRQHandler(void), EXTI1_IRQHandler(void), EXTI2_IRQHandler(void);
 extern void EXTI3_IRQHandler(void), EXTI4_IRQHandler(void), EXTI9_5_IRQHandler(void);
@@ -15,6 +25,17 @@ const uintptr_t vectors[16 + 96] = {
     (uintptr_t)&_estack, (uintptr_t)Reset_Handler,
     (uintptr_t)fault, (uintptr_t)fault, (uintptr_t)fault,
     (uintptr_t)fault, (uintptr_t)fault,
+#ifdef FREERTOS_QEMU_TEST
+    [11] = (uintptr_t)SVC_Handler,
+    [14] = (uintptr_t)PendSV_Handler,
+    [15] = (uintptr_t)freertos_systick_handler,
+#endif
+#ifdef ANALYZER_RUNTIME_TEST
+    [16] = (uintptr_t)ANALYZER_TEST_IRQHandler,
+#endif
+#ifdef RTOS_CAPTURE_TEST
+    [16 + 54] = (uintptr_t)TIM6_DAC_IRQHandler,
+#endif
 #ifdef STM32_CAPTURE_TEST
     [16 + 6] = (uintptr_t)EXTI0_IRQHandler,
     [16 + 7] = (uintptr_t)EXTI1_IRQHandler,

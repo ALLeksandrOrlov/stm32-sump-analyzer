@@ -11,13 +11,21 @@
 #include <termios.h>
 #include <unistd.h>
 
+enum { TX_QUEUE_PACKETS = 3 };
+
+typedef struct {
+    uint8_t bytes[ANALYZER_TRANSFER_BYTES];
+    size_t length;
+} tx_packet_t;
+
 typedef struct {
     int serial_fd;
     uint8_t samples[CAPTURE_BUFFER_SAMPLES];
     uint32_t sample_count;
     capture_hw_event_t event;
-    uint8_t tx[ANALYZER_TRANSFER_BYTES];
-    size_t tx_length;
+    tx_packet_t tx_queue[TX_QUEUE_PACKETS];
+    size_t tx_head;
+    size_t tx_count;
     size_t tx_offset;
 } fixture_t;
 
@@ -78,27 +86,51 @@ static const uint8_t *capture_buffer(void *context, uint32_t *next_write)
     *next_write = fixture->sample_count;
     return fixture->samples;
 }
-static bool transport_ready(void *context)
+static bool transport_idle(void *context)
 {
     fixture_t *fixture = context;
-    if (fixture->tx_offset < fixture->tx_length) {
-        ssize_t written = write(fixture->serial_fd, fixture->tx + fixture->tx_offset,
-                                fixture->tx_length - fixture->tx_offset);
-        if (written > 0) {
-            fixture->tx_offset += (size_t)written;
-        }
-    }
-    return fixture->tx_offset == fixture->tx_length;
+    return fixture->tx_count == 0;
 }
+
 static bool transport_write(void *context, const uint8_t *bytes, size_t length)
 {
     fixture_t *fixture = context;
-    if (length > sizeof(fixture->tx) || !transport_ready(context)) {
+    if (length == 0 || length > ANALYZER_TRANSFER_BYTES ||
+        fixture->tx_count == TX_QUEUE_PACKETS) {
         return false;
     }
-    memcpy(fixture->tx, bytes, length);
-    fixture->tx_length = length;
-    fixture->tx_offset = 0;
+    size_t tail = (fixture->tx_head + fixture->tx_count) % TX_QUEUE_PACKETS;
+    tx_packet_t *packet = &fixture->tx_queue[tail];
+    memcpy(packet->bytes, bytes, length);
+    packet->length = length;
+    ++fixture->tx_count;
+    return true;
+}
+
+static void transport_cancel(void *context)
+{
+    fixture_t *fixture = context;
+    /* Finish a partially written packet; later queued packets are discarded. */
+    fixture->tx_count = fixture->tx_offset > 0 ? 1 : 0;
+}
+
+static bool flush_transport(fixture_t *fixture)
+{
+    if (fixture->tx_count == 0) {
+        return true;
+    }
+    tx_packet_t *packet = &fixture->tx_queue[fixture->tx_head];
+    ssize_t written = write(fixture->serial_fd, packet->bytes + fixture->tx_offset,
+                            packet->length - fixture->tx_offset);
+    if (written < 0) {
+        return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+    }
+    fixture->tx_offset += (size_t)written;
+    if (fixture->tx_offset == packet->length) {
+        fixture->tx_head = (fixture->tx_head + 1) % TX_QUEUE_PACKETS;
+        --fixture->tx_count;
+        fixture->tx_offset = 0;
+    }
     return true;
 }
 
@@ -136,10 +168,14 @@ int main(void)
             .poll = capture_event, .buffer = capture_buffer
         },
         (analyzer_transport_t){
-            .context = &fixture, .ready = transport_ready, .write = transport_write
+            .context = &fixture, .write = transport_write,
+            .idle = transport_idle, .cancel = transport_cancel
         }, 168000000);
     for (;;) {
-        struct pollfd fd = {.fd = fixture.serial_fd, .events = POLLIN};
+        struct pollfd fd = {
+            .fd = fixture.serial_fd,
+            .events = POLLIN | (fixture.tx_count > 0 ? POLLOUT : 0)
+        };
         if (poll(&fd, 1, 1) < 0 && errno != EINTR) {
             perror("poll");
             return 1;
@@ -154,5 +190,9 @@ int main(void)
             analyzer_app_receive(&app, byte);
         }
         analyzer_app_poll(&app);
+        if (!flush_transport(&fixture)) {
+            perror("write PTY");
+            return 1;
+        }
     }
 }

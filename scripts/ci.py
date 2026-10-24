@@ -102,6 +102,7 @@ def run_checks(output):
         ("coverage", ["make", "coverage"], 120),
         ("qemu-core", ["make", "qemu-test"], 120),
         ("qemu-stm32", ["make", "qemu-stm32-test", f"QEMU={PATCHED_QEMU}"], 120),
+        ("qemu-rtos", ["make", "qemu-rtos-test", f"QEMU={PATCHED_QEMU}"], 120),
         ("firmware", ["make", "-j2", "firmware"], 300),
     ]
     results = []

@@ -60,12 +60,27 @@ docker buildx build --progress=plain --target ci --load -t stm32-sump-analyzer-c
   контракт в HTML-отчёте; не снижайте порог только для успешной сборки.
 - `qemu-core`: загрузка тестового ELF, semihosting или поведение переносимого ядра.
 - `qemu-stm32`: периферия, DMA, EXTI, IRQ или модель анализатора.
-- `firmware`: компилятор, linker, память или интеграция STM32/USB.
+- `qemu-rtos`: приоритеты IRQ, запуск планировщика, MessageBuffer, уведомления,
+  владение TX-буфером или восстановление сессии USB.
+- `firmware`: компилятор, linker, память или интеграция STM32/FreeRTOS/USB.
 
 `unsupported machine type stm32f407-sump-analyzer` означает запуск обычного QEMU.
 Используйте контейнер либо `QEMU=qemu-system-arm-sump-analyzer` внутри него.
 `QEMU failed: ... timed out` — тест завис или слишком долго выполняется;
 проверьте, достигается ли Reset_Handler и не попал ли процессор в fault handler.
+
+## FreeRTOS assertion на плате
+
+В отладчике проверьте `failure_file` и `failure_line` из `freertos_support.c`.
+USB IRQ должен иметь приоритет 6 и включаться только через `activate()` задачи TX
+после запуска ядра. IRQ захвата с приоритетом 1 не могут вызывать API FreeRTOS:
+для уведомления используется TIM6_DAC с приоритетом 5. Индекс 0 уведомлений
+зарезервирован MessageBuffer, прикладные события используют индекс 1.
+
+Если аппаратная инициализация USB останавливается в `HAL_Delay`, проверьте SysTick
+и восстановление BASEPRI после создания статических задач. До запуска ядра tick
+должен обслуживать HAL, а после запуска — также порт FreeRTOS. Порядок подключения
+обработчиков описан в [правилах CubeMX](cubemx.md).
 
 ## Файлы не создаются на macOS
 

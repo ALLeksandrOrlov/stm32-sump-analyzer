@@ -84,21 +84,22 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  analyzer_board_init();
+  if (!analyzer_board_init()) {
+    Error_Handler();
+  }
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
-  HAL_NVIC_SetPriority(OTG_FS_IRQn, 3, 0);
+  analyzer_board_start();
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    analyzer_board_poll();
     /* USER CODE END WHILE */
     __WFI();
     /* USER CODE BEGIN 3 */
@@ -173,8 +174,10 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-
+  __disable_irq();
+  for (;;) {
+    __WFI();
+  }
   /* USER CODE END Error_Handler_Debug */
 }
 

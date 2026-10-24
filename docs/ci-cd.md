@@ -18,15 +18,24 @@ make docker-build
 
 Последовательность:
 
-1. Самопроверка CI: ошибки, таймауты, запрет публикации при провале и SHA256.
+1. Самопроверка CI: ошибки, таймауты, запрет публикации при провале, установка
+   модели QEMU и SHA256 исходников закреплённого FreeRTOS.
 2. Проверка секций CubeMX.
-3. Нативные тесты протокола, ECA, прикладной логики и USB mailbox;
+3. Нативные тесты протокола, ECA, прикладной логики и адаптера USB CDC;
    компиляция тестового устройства PulseView.
 4. Те же тесты под AddressSanitizer и UndefinedBehaviorSanitizer.
 5. Измерение покрытия ядра и адаптера USB: не менее 95% строк и 90% ветвей.
 6. Переносимое ядро на Cortex-M4 в обычном QEMU.
 7. Настоящий STM32-драйвер на расширенной модели QEMU.
-8. Сборка прошивки и упаковка результатов, если **все** проверки прошли.
+8. Две задачи и MessageBuffer на настоящем FreeRTOS в QEMU Cortex-M4F:
+   запуск IRQ, обратное давление, отмена, переподключение и завершение TX;
+   отдельный ELF проверяет их совместную работу с драйвером захвата и отложенным IRQ.
+9. Сборка прошивки и упаковка результатов, если **все** проверки прошли.
+
+Три этапа QEMU используют четыре тестовых ELF. В проверках RTOS физический
+USB заменён тестовым портом с управляемыми IRQ и моментом завершения передачи.
+Нативное покрытие измеряется для `core/` и `platform/stm32/usb_cdc_port.c`;
+оно не включает планировщик или код MessageBuffer.
 
 QEMU использует программную эмуляцию TCG; KVM, вложенная виртуализация,
 `--privileged` и доступ к USB для тестов не нужны. Запуск QEMU ограничен таймаутом.
@@ -93,6 +102,8 @@ Workflow: `.github/workflows/build.yml`.
 Токен build job имеет только `contents: read`, checkout не сохраняет credentials.
 Право `contents: write` есть только у release job. Сторонних release-токенов и
 секретов не требуется. Actions закреплены на SHA, а QEMU — на версии и commit.
+FreeRTOS V11.3.1 хранится в `third_party/FreeRTOS-Kernel/`; манифест SHA256
+проверяет выбранные исходники без обращения к сети.
 Dependabot еженедельно предлагает обновления Actions и базового Docker-образа.
 Кеш BuildKit хранится через GitHub Actions Cache. Базовый Debian-образ закреплён
 на digest; apt-пакеты пока берутся из текущего bookworm, поэтому побитовая
@@ -113,6 +124,11 @@ docker run --rm --network=none --user "$(id -u):$(id -g)" \
 docker run --rm --network=none --user "$(id -u):$(id -g)" \
   --mount "type=bind,src=$PWD,dst=/project" \
   stm32-sump-analyzer-ci:local make qemu-stm32-test QEMU=qemu-system-arm-sump-analyzer
+
+# Задачи и USB, затем их интеграция с захватом на настоящем ядре RTOS
+docker run --rm --network=none --user "$(id -u):$(id -g)" \
+  --mount "type=bind,src=$PWD,dst=/project" \
+  stm32-sump-analyzer-ci:local make qemu-rtos-test QEMU=qemu-system-arm-sump-analyzer
 ```
 
 При прямом `docker run` без переменных `SOURCE_*` происхождение сборки в метаданных

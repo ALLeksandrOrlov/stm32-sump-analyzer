@@ -4,15 +4,23 @@
 #include <stdio.h>
 #include <string.h>
 
+enum { TRANSPORT_QUEUE_PACKETS = 3 };
+
+typedef struct {
+    uint8_t bytes[ANALYZER_TRANSFER_BYTES];
+    size_t length;
+} test_packet_t;
+
 typedef struct {
     uint8_t data[CAPTURE_BUFFER_SAMPLES];
     uint32_t next;
-    unsigned starts, stops, polls, buffer_reads;
-    bool start_ok, busy, reject, missing_buffer;
+    unsigned starts, stops, polls, buffer_reads, cancellations, write_attempts;
+    bool start_ok, busy, reject, missing_buffer, pause_transmitter;
     capture_hw_event_t event;
     capture_plan_t plan;
-    const uint8_t *borrowed;
-    size_t borrowed_length;
+    /* The first packet may be owned by hardware; all slots own their bytes. */
+    test_packet_t packets[TRANSPORT_QUEUE_PACKETS];
+    size_t queue_head, queue_count;
     uint8_t wire[CAPTURE_BUFFER_SAMPLES + 256];
     size_t wire_length;
 } test_fixture_t;
@@ -51,31 +59,51 @@ static const uint8_t *driver_buffer(void *context, uint32_t *next)
     return state->missing_buffer ? NULL : state->data;
 }
 
-static bool transport_ready(void *context)
+static bool transport_idle(void *context)
 {
-    return !((test_fixture_t *)context)->busy;
+    return ((test_fixture_t *)context)->queue_count == 0;
 }
 
 static bool transport_write(void *context, const uint8_t *data, size_t length)
 {
     test_fixture_t *state = context;
-    assert(!state->busy);
-    if (state->reject) {
+    assert(length > 0 && length <= ANALYZER_TRANSFER_BYTES);
+    ++state->write_attempts;
+    if (state->reject || state->queue_count == TRANSPORT_QUEUE_PACKETS) {
         return false;
     }
-    state->borrowed = data;
-    state->borrowed_length = length;
-    state->busy = true;
+    size_t tail = (state->queue_head + state->queue_count) % TRANSPORT_QUEUE_PACKETS;
+    test_packet_t *packet = &state->packets[tail];
+    memcpy(packet->bytes, data, length);
+    packet->length = length;
+    ++state->queue_count;
+    if (!state->pause_transmitter) {
+        state->busy = true;
+    }
     return true;
 }
-/* Copy on completion to catch writes to buffers still owned by transport. */
+
+static void transport_cancel(void *context)
+{
+    test_fixture_t *state = context;
+    ++state->cancellations;
+    /* Hardware may still read the head slot. Other accepted packets are
+     * queued work and must never appear on the wire after cancellation. */
+    state->queue_count = state->busy ? 1 : 0;
+}
+
+/* Delivery uses the copied packet, even if the app has reused its scratch RAM. */
 static void complete_transfer(void)
 {
     assert(fixture.busy);
-    assert(fixture.wire_length + fixture.borrowed_length <= sizeof(fixture.wire));
-    memcpy(fixture.wire + fixture.wire_length, fixture.borrowed, fixture.borrowed_length);
-    fixture.wire_length += fixture.borrowed_length;
-    fixture.busy = false;
+    assert(fixture.queue_count > 0);
+    test_packet_t *packet = &fixture.packets[fixture.queue_head];
+    assert(fixture.wire_length + packet->length <= sizeof(fixture.wire));
+    memcpy(fixture.wire + fixture.wire_length, packet->bytes, packet->length);
+    fixture.wire_length += packet->length;
+    fixture.queue_head = (fixture.queue_head + 1) % TRANSPORT_QUEUE_PACKETS;
+    --fixture.queue_count;
+    fixture.busy = fixture.queue_count > 0 && !fixture.pause_transmitter;
 }
 
 static void reset_fixture(void)
@@ -91,8 +119,9 @@ static void reset_fixture(void)
     };
     analyzer_transport_t transport = {
         .context = &fixture,
-        .ready = transport_ready,
-        .write = transport_write
+        .write = transport_write,
+        .idle = transport_idle,
+        .cancel = transport_cancel
     };
     analyzer_app_init(&app, driver, transport, 168000000);
 }
@@ -113,7 +142,8 @@ static void drain_transfers(void)
         analyzer_app_poll(&app);
         if (fixture.busy) {
             complete_transfer();
-        } else if (!app.reply_length && app.capture.state != CAPTURE_SENDING) {
+        } else if (transport_idle(&fixture) &&
+                   !app.reply_length && app.capture.state != CAPTURE_SENDING) {
             return;
         }
     }
@@ -267,18 +297,21 @@ static void test_command_counts_and_capture_transitions(void)
     assert(app.capture.state == CAPTURE_ERROR);
 }
 
-static void test_control_replies_retry_and_preserve_borrowed_buffers(void)
+static void test_control_replies_retry_and_copy_before_accepting(void)
 {
     reset_fixture();
     send_command(SUMP_ID, 0);
     assert(!analyzer_app_receive(&app, SUMP_META));
     fixture.reject = true;
     analyzer_app_poll(&app);
-    assert(app.reply_length == 4 && !app.tx_in_flight);
+    assert(app.reply_length == 4 && fixture.queue_count == 0);
     fixture.reject = false;
     analyzer_app_poll(&app);
     send_command(SUMP_META, 0);
     analyzer_app_poll(&app);
+    assert(fixture.queue_count == 2 && app.reply_length == 0);
+    /* Both replies are already owned by the transport. */
+    memset(app.reply, 0xff, sizeof(app.reply));
     complete_transfer();
     assert(fixture.wire_length == 4 && memcmp(fixture.wire, "1ALS", 4) == 0);
     drain_transfers();
@@ -610,6 +643,151 @@ static void test_control_reply_does_not_interrupt_sample_stream(void)
     assert(memcmp(fixture.wire + 132, "1ALS", 4) == 0);
 }
 
+static void test_run_after_final_delivery_does_not_require_an_intervening_poll(void)
+{
+    reset_fixture();
+    send_command(SUMP_COUNTS, 0);
+    send_command(SUMP_RUN, 0);
+    fixture.event = CAPTURE_HW_COMPLETE;
+    analyzer_app_poll(&app);
+    complete_transfer();
+    assert(app.capture.state == CAPTURE_SENDING && transport_idle(&fixture));
+    send_command(SUMP_RUN, 0);
+    assert(fixture.starts == 2 && app.capture.state == CAPTURE_RUNNING);
+    assert(app.samples_sent == 0);
+}
+
+static void test_capture_uses_queue_capacity_and_retries_without_skipping_samples(void)
+{
+    reset_fixture();
+    app.config.samples = 260;
+    app.config.post_trigger = 260;
+    for (uint32_t i = 0; i < app.config.samples; ++i) {
+        fixture.data[i] = (uint8_t)i;
+    }
+    send_command(SUMP_RUN, 0);
+    fixture.event = CAPTURE_HW_COMPLETE;
+
+    for (unsigned packets = 1; packets <= TRANSPORT_QUEUE_PACKETS; ++packets) {
+        analyzer_app_poll(&app);
+        assert(fixture.queue_count == packets);
+        assert(app.samples_sent == packets * ANALYZER_TRANSFER_BYTES);
+        assert(fixture.write_attempts == packets);
+    }
+    assert(fixture.busy && fixture.wire_length == 0);
+    analyzer_app_poll(&app); /* The queue is full; the next packet is rejected. */
+    assert(app.samples_sent == 192 && fixture.queue_count == TRANSPORT_QUEUE_PACKETS);
+    assert(fixture.write_attempts == 4);
+
+    complete_transfer();
+    analyzer_app_poll(&app);
+    assert(app.samples_sent == 256 && fixture.queue_count == TRANSPORT_QUEUE_PACKETS);
+    complete_transfer();
+    analyzer_app_poll(&app);
+    assert(app.samples_sent == 260 && fixture.queue_count == TRANSPORT_QUEUE_PACKETS);
+    /* All bytes are accepted, but completion waits for all three packets. */
+    for (unsigned remaining = TRANSPORT_QUEUE_PACKETS; remaining > 0; --remaining) {
+        analyzer_app_poll(&app);
+        assert(app.capture.state == CAPTURE_SENDING);
+        assert(fixture.queue_count == remaining);
+        complete_transfer();
+    }
+    analyzer_app_poll(&app);
+    assert(app.capture.state == CAPTURE_IDLE && fixture.wire_length == 260);
+    for (uint32_t i = 0; i < 260; ++i) {
+        assert(fixture.wire[i] == (uint8_t)(259 - i));
+    }
+}
+
+static void test_capture_waits_for_queued_packets_even_without_active_hardware(void)
+{
+    reset_fixture();
+    fixture.pause_transmitter = true;
+    send_command(SUMP_COUNTS, 0);
+    send_command(SUMP_RUN, 0);
+    fixture.event = CAPTURE_HW_COMPLETE;
+    analyzer_app_poll(&app);
+    assert(!fixture.busy && fixture.queue_count == 1 && app.samples_sent == 4);
+    analyzer_app_poll(&app);
+    assert(app.capture.state == CAPTURE_SENDING);
+    assert(fixture.write_attempts == 1);
+    fixture.pause_transmitter = false;
+    fixture.busy = true; /* The transport task begins its queued packet. */
+    complete_transfer();
+    analyzer_app_poll(&app);
+    assert(app.capture.state == CAPTURE_IDLE);
+}
+
+static void test_full_queue_backpressures_control_commands_until_reply_is_accepted(void)
+{
+    reset_fixture();
+    for (unsigned i = 0; i < TRANSPORT_QUEUE_PACKETS; ++i) {
+        send_command(SUMP_ID, 0);
+        analyzer_app_poll(&app);
+    }
+    send_command(SUMP_ID, 0);
+    analyzer_app_poll(&app);
+    assert(app.reply_length == 4);
+    assert(!analyzer_app_receive(&app, SUMP_META));
+    complete_transfer();
+    analyzer_app_poll(&app);
+    assert(app.reply_length == 0);
+    assert(analyzer_app_receive(&app, SUMP_META));
+    drain_transfers();
+    for (size_t i = 0; i < (TRANSPORT_QUEUE_PACKETS + 1) * 4; i += 4) {
+        assert(memcmp(fixture.wire + i, "1ALS", 4) == 0);
+    }
+}
+
+static void test_reset_discards_queued_samples_but_preserves_active_packet(void)
+{
+    reset_fixture();
+    app.config.samples = 260;
+    app.config.post_trigger = 260;
+    memset(fixture.data, 0x5a, 260);
+    send_command(SUMP_RUN, 0);
+    fixture.event = CAPTURE_HW_COMPLETE;
+    for (unsigned i = 0; i < TRANSPORT_QUEUE_PACKETS; ++i) {
+        analyzer_app_poll(&app);
+    }
+    assert(fixture.queue_count == 3 && app.samples_sent == 192);
+    send_command(SUMP_RESET, 0);
+    assert(fixture.cancellations == 1 && fixture.queue_count == 1 && fixture.busy);
+    assert(app.samples_sent == 0 && app.capture.state == CAPTURE_IDLE);
+    memset(app.tx, 0xff, sizeof(app.tx));
+    send_command(SUMP_ID, 0);
+    analyzer_app_poll(&app);
+    assert(fixture.queue_count == 2);
+    drain_transfers();
+    assert(fixture.wire_length == 68);
+    for (size_t i = 0; i < 64; ++i) {
+        assert(fixture.wire[i] == 0x5a);
+    }
+    assert(memcmp(fixture.wire + 64, "1ALS", 4) == 0);
+}
+
+static void test_reset_discards_every_packet_when_transmitter_has_not_started(void)
+{
+    reset_fixture();
+    fixture.pause_transmitter = true;
+    for (unsigned i = 0; i < TRANSPORT_QUEUE_PACKETS; ++i) {
+        send_command(SUMP_ID, 0);
+        analyzer_app_poll(&app);
+    }
+    assert(fixture.queue_count == 3 && !fixture.busy);
+    analyzer_app_reset(&app);
+    assert(fixture.cancellations == 1 && transport_idle(&fixture));
+    assert(fixture.wire_length == 0);
+    fixture.pause_transmitter = false;
+    send_command(SUMP_META, 0);
+    drain_transfers();
+    uint8_t expected[ANALYZER_TRANSFER_BYTES];
+    size_t length = sump_metadata(expected, sizeof(expected),
+                                  CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ);
+    assert(fixture.wire_length == length);
+    assert(memcmp(fixture.wire, expected, length) == 0);
+}
+
 static void test_invalid_capture_buffer_stops_without_transmitting(void)
 {
     for (unsigned missing = 0; missing < 2; ++missing) {
@@ -674,7 +852,8 @@ static void test_reset_allows_new_capture_with_previous_transfer_in_flight(void)
     send_command(SUMP_RUN, 0);
     fixture.event = CAPTURE_HW_COMPLETE;
     analyzer_app_poll(&app);
-    assert(app.capture.state == CAPTURE_SENDING && app.samples_sent == 0);
+    assert(app.capture.state == CAPTURE_SENDING && app.samples_sent == 4);
+    assert(fixture.queue_count == 2);
     complete_transfer();
     drain_transfers();
     const uint8_t expected[] = {0x11, 0x11, 0x11, 0x11, 0x22, 0x22, 0x22, 0x22};
@@ -721,10 +900,16 @@ int main(void)
     test_divider_decoding_uses_physical_time_units();
     test_failed_start_stops_hardware_and_requires_reset();
     test_capture_snapshot_is_independent_of_new_configuration();
-    test_control_replies_retry_and_preserve_borrowed_buffers();
+    test_control_replies_retry_and_copy_before_accepting();
     test_captured_samples_are_sent_newest_first();
     test_capture_waits_for_final_transfer_before_reply_or_restart();
     test_control_reply_does_not_interrupt_sample_stream();
+    test_run_after_final_delivery_does_not_require_an_intervening_poll();
+    test_capture_uses_queue_capacity_and_retries_without_skipping_samples();
+    test_capture_waits_for_queued_packets_even_without_active_hardware();
+    test_full_queue_backpressures_control_commands_until_reply_is_accepted();
+    test_reset_discards_queued_samples_but_preserves_active_packet();
+    test_reset_discards_every_packet_when_transmitter_has_not_started();
     test_invalid_capture_buffer_stops_without_transmitting();
     test_read_boundaries_preserve_output();
     test_reset_while_sending();

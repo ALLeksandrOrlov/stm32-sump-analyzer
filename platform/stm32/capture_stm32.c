@@ -10,6 +10,7 @@ static volatile bool waiting_for_trigger;
 static uint32_t sample_count;
 static volatile uint32_t next_write_index;
 static uint8_t trigger_mask;
+static void (*event_callback)(void);
 
 #define SAMPLE_PIN_MASK 0xffu
 #define DMA_ERROR_FLAGS (DMA_HISR_TEIF5 | DMA_HISR_DMEIF5 | DMA_HISR_FEIF5)
@@ -174,6 +175,22 @@ capture_driver_t capture_stm32_driver(void)
     return (capture_driver_t){NULL, start, stop, poll, buffer};
 }
 
+void capture_stm32_set_event_callback(void (*callback)(void))
+{
+    uint32_t mask = disable_interrupts();
+    event_callback = callback;
+    __set_PRIMASK(mask);
+}
+
+static void publish_event(capture_hw_event_t event)
+{
+    pending_event = event;
+    __DMB();
+    if (event_callback != NULL) {
+        event_callback();
+    }
+}
+
 void capture_stm32_exti_irq(void)
 {
     uint32_t pending = EXTI->PR & EXTI->IMR & trigger_mask;
@@ -184,7 +201,7 @@ void capture_stm32_exti_irq(void)
     TIM8->CNT = 0;
     TIM8->SR = 0;
     TIM8->CR1 |= TIM_CR1_CEN;
-    pending_event = CAPTURE_HW_TRIGGERED;
+    publish_event(CAPTURE_HW_TRIGGERED);
 }
 
 static void complete(void)
@@ -195,7 +212,7 @@ static void complete(void)
     __DMB();
     /* TIM8's IRQ can run before an already-pending DMA error IRQ. Inspect
      * status after the last transfer stops, before publishing the buffer. */
-    pending_event = stopped && !dma_failed ? CAPTURE_HW_COMPLETE : CAPTURE_HW_ERROR;
+    publish_event(stopped && !dma_failed ? CAPTURE_HW_COMPLETE : CAPTURE_HW_ERROR);
 }
 
 void capture_stm32_tim8_update_irq(void)
@@ -212,6 +229,6 @@ void capture_stm32_dma2_stream5_irq(void)
     if (!capture_active) return;
     if (status & DMA_ERROR_FLAGS) {
         stop_hardware();
-        pending_event = CAPTURE_HW_ERROR;
+        publish_event(CAPTURE_HW_ERROR);
     } else if (!trigger_mask && (status & DMA_HISR_TCIF5)) complete();
 }

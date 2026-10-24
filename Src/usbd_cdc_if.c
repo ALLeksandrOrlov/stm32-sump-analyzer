@@ -23,7 +23,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-#include "analyzer_board.h"
+#include "analyzer_runtime.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -164,7 +164,7 @@ static int8_t CDC_Init_FS(void)
   /* USER CODE BEGIN 3 */
   USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
-  analyzer_board_usb_reset();
+  analyzer_runtime_usb_connected_from_isr();
   return USBD_OK;
   /* USER CODE END 3 */
 }
@@ -176,7 +176,7 @@ static int8_t CDC_Init_FS(void)
 static int8_t CDC_DeInit_FS(void)
 {
   /* USER CODE BEGIN 4 */
-  analyzer_board_usb_reset();
+  analyzer_runtime_usb_disconnected_from_isr();
   return USBD_OK;
   /* USER CODE END 4 */
 }
@@ -283,7 +283,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  analyzer_board_usb_receive(Buf, *Len);
+  analyzer_runtime_usb_receive_from_isr(Buf, *Len);
   return USBD_OK;
   /* USER CODE END 6 */
 }
@@ -314,24 +314,7 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
-uint8_t Analyzer_CDC_Ready(void)
-{
-  uint32_t mask = __get_PRIMASK();
-  __disable_irq();
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
-  uint8_t ready = hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED &&
-                  hcdc != NULL && hcdc->TxState == 0;
-  __set_PRIMASK(mask);
-  return ready;
-}
 
-void Analyzer_CDC_Rearm(void)
-{
-  if (hUsbDeviceFS.dev_state == USBD_STATE_CONFIGURED && hUsbDeviceFS.pClassData) {
-    USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
-    USBD_CDC_ReceivePacket(&hUsbDeviceFS);
-  }
-}
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 
 /**
