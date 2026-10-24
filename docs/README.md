@@ -23,8 +23,3 @@ Docker to capturing and decoding a waveform in PulseView.
 - [PulseView screenshots](pulseview-screenshots.md): reproduce the screenshots with a synthetic SUMP device.
 - [Releases](releases.md): versions, tags and firmware publication.
 - [Troubleshooting](troubleshooting.md): Docker, test, USB and RTOS diagnostics.
-
-## Hardware results
-
-- [STM32F4 Discovery, 2026-10-24](hardware-results/stm32f4-discovery-2026-10-24.md): physical USB, PD0 capture and transport load.
-- [USER button triggers, 2026-10-24](hardware-results/stm32f4-discovery-user-button-2026-10-24.md): physical rising and falling edges on PA0 in a diagnostic build.

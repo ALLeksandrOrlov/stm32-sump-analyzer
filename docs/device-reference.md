@@ -35,8 +35,8 @@ configuration divides the timer clock by nine:
 This approximately 18.667 MHz value describes timer quantization. It is not a
 measured guarantee that GPIO and DMA sustain that rate without missing input
 transitions. The sustainable maximum, timing accuracy and jitter require
-measurement on the board. The [hardware report](hardware-results/stm32f4-discovery-2026-10-24.md)
-states which scenarios have been tested.
+measurement on the board. See the [hardware validation procedure](hardware-validation.md)
+for signal and timing checks.
 
 ## Capture and trigger behavior
 
