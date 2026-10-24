@@ -31,7 +31,8 @@ enum { USB_CONNECT = 1u, USB_RECEIVE = 2u, USB_TRANSMIT = 4u };
 uint32_t SystemCoreClock = 168000000;
 uint32_t HAL_RCC_GetPCLK2Freq(void) { return 168000000; }
 static StaticTask_t stimulus_control;
-static StackType_t stimulus_stack[1024];
+enum { STIMULUS_STACK_WORDS = 512 };
+static StackType_t stimulus_stack[STIMULUS_STACK_WORDS];
 static struct {
     bool activated;
     bool out_credit;
@@ -292,6 +293,8 @@ static void stimulus(void *argument)
     test_trigger_and_timer_completion_use_deferred_irq();
     test_reset_stops_armed_capture_without_spurious_event();
     puts("ALL RTOS CAPTURE TESTS PASSED");
+    /* Keep a measured margin after all test paths, including semihost output. */
+    assert(uxTaskGetStackHighWaterMark2(NULL) >= 128);
     exit(0);
 }
 
@@ -312,7 +315,7 @@ int main(void)
     usb.out_credit = true;
     usb_events = USB_CONNECT;
     NVIC_SetPendingIRQ(USB_TEST_IRQ);
-    assert(xTaskCreateStatic(stimulus, "capture-test", 1024, NULL, 4,
+    assert(xTaskCreateStatic(stimulus, "capture-test", STIMULUS_STACK_WORDS, NULL, 4,
                              stimulus_stack, &stimulus_control));
     vTaskStartScheduler();
     return 1;

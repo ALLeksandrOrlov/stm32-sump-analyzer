@@ -17,5 +17,7 @@ SECTIONS {
     } > RAM
     end = .;
     _end = .;
-    ASSERT(_ebss < _estack - 16384, "Test image must leave 16K for stack/heap")
+    /* Task stacks are static BSS. Reserve separate space for MSP and the
+       semihosting C library in the images with a full word-DMA buffer. */
+    ASSERT(_ebss < _estack - 4096, "Test image must leave 4K for stack/heap")
 }

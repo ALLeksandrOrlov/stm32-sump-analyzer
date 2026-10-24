@@ -12,8 +12,11 @@ enum { FIXTURE_ID, FIXTURE_LEVEL, FIXTURE_STEP, FIXTURE_AUTO_INCREMENT,
        FIXTURE_TICKS, FIXTURE_DMA_ERROR };
 #define FIXTURE ((volatile uint32_t *)0x60000000u)
 static analyzer_app_t app;
-static uint8_t wire[CAPTURE_BUFFER_SAMPLES];
+/* Small captures are retained for edge assertions. Full captures are checked
+ * as packets arrive, leaving RAM for the production DMA buffer. */
+static uint8_t wire[128];
 static size_t wire_length;
+static uint32_t expected_ramp_samples;
 uint32_t SystemCoreClock = 168000000;
 /* The model has a fixed timer clock. PLL/RCC startup is outside these tests. */
 uint32_t HAL_RCC_GetPCLK2Freq(void) { return 168000000; }
@@ -32,8 +35,15 @@ static void cancel(void *ctx) { (void)ctx; }
 static bool send_bytes(void *ctx, const uint8_t *data, size_t size)
 {
     (void)ctx;
-    assert(wire_length + size <= sizeof(wire));
-    memcpy(wire + wire_length, data, size);
+    if (expected_ramp_samples != 0) {
+        assert(wire_length + size <= expected_ramp_samples);
+        for (size_t i = 0; i < size; ++i) {
+            assert(data[i] == (uint8_t)(expected_ramp_samples - wire_length - i));
+        }
+    } else {
+        assert(wire_length + size <= sizeof(wire));
+        memcpy(wire + wire_length, data, size);
+    }
     wire_length += size;
     return true;
 }
@@ -48,6 +58,7 @@ static void setup(uint32_t count, uint8_t mask, uint8_t value)
 {
     analyzer_app_reset(&app);
     wire_length = 0;
+    expected_ramp_samples = 0;
     FIXTURE[FIXTURE_AUTO_INCREMENT] = 0;
     FIXTURE[FIXTURE_LEVEL] = 0;
     FIXTURE[FIXTURE_STEP] = 1;
@@ -76,12 +87,56 @@ static void assert_stopped(void)
 static void test_untriggered(uint32_t count)
 {
     setup(count, 0, 0);
+    expected_ramp_samples = count;
     FIXTURE[FIXTURE_AUTO_INCREMENT] = 1;
     command(SUMP_RUN, 0);
     wait_complete();
     assert(wire_length == count);
-    for (uint32_t i = 0; i < count; ++i) assert(wire[i] == (uint8_t)(count - i));
     assert_stopped();
+}
+
+static void test_word_capture_compacts_once(void)
+{
+    setup(4, 0, 0);
+    capture_driver_t driver = capture_stm32_driver();
+    capture_config_t config;
+    capture_config_default(&config);
+    /* An odd sample count ends partway through a packed word. The GPIO high
+     * byte is deliberately nonzero and must not appear in the eight channels. */
+    config.samples = 7;
+    config.post_trigger = 7;
+    config.sample_period_ns = 10000;
+    capture_plan_t plan;
+    assert(capture_make_plan(&config, capture_stm32_timer_clock_hz(), &plan));
+    FIXTURE[FIXTURE_LEVEL] = 0xa5f8;
+    FIXTURE[FIXTURE_STEP] = 0x101;
+    FIXTURE[FIXTURE_AUTO_INCREMENT] = 1;
+    assert(driver.start(driver.context, &plan));
+    uint32_t widths = DMA2_Stream5->CR & (DMA_SxCR_PSIZE | DMA_SxCR_MSIZE);
+    assert(widths == (DMA_SxCR_PSIZE_1 | DMA_SxCR_MSIZE_1));
+    volatile const uint32_t *raw = (volatile const uint32_t *)DMA2_Stream5->M0AR;
+    for (unsigned spin = 0; TIM1->CR1 & TIM_CR1_CEN; ++spin) {
+        assert(spin < 1000000);
+    }
+    assert_stopped();
+    assert(DMA2_Stream5->NDTR == 0);
+    for (unsigned i = 0; i < config.samples; ++i) {
+        /* The ISR must leave word samples intact until task context polls. */
+        assert(raw[i] == (0xa5f8u + (i + 1u) * 0x101u));
+    }
+    assert(raw[config.samples] == 0); /* DMA stopped at the requested boundary. */
+
+    assert(driver.poll(driver.context) == CAPTURE_HW_COMPLETE);
+    uint32_t next;
+    const uint8_t *packed = driver.buffer(driver.context, &next);
+    assert(next == config.samples);
+    for (unsigned repetition = 0; repetition < 3; ++repetition) {
+        assert(driver.poll(driver.context) == CAPTURE_HW_NONE);
+        for (unsigned i = 0; i < config.samples; ++i) {
+            assert(packed[i] == (uint8_t)(0xf9u + i));
+        }
+    }
+    driver.stop(driver.context);
 }
 static void test_edge(uint8_t pin, bool rising)
 {
@@ -162,16 +217,16 @@ static void test_dma_error_at_completion(void)
     assert_stopped();
     test_untriggered(4);
 }
-static void test_peripheral_increment_is_rejected(void)
+static void test_invalid_dma_configuration(uint32_t clear, uint32_t set)
 {
     setup(4, 0, 0);
     command(SUMP_RUN, 0);
-    /* GPIO input is a fixed peripheral address. Configure an invalid stream
-     * while disabled, then verify the model reports a transfer error. */
+    /* Configure an invalid stream while disabled, then verify the model
+     * reports a transfer error instead of accepting unsupported transfers. */
     __disable_irq();
     TIM1->CR1 &= ~TIM_CR1_CEN;
     DMA2_Stream5->CR &= ~DMA_SxCR_EN;
-    DMA2_Stream5->CR |= DMA_SxCR_PINC;
+    DMA2_Stream5->CR = (DMA2_Stream5->CR & ~clear) | set;
     DMA2_Stream5->CR |= DMA_SxCR_EN;
     TIM1->CR1 |= TIM_CR1_CEN;
     __enable_irq();
@@ -199,10 +254,10 @@ static void test_prescaled_sample_clock(void)
 
 static void test_gpio(void)
 {
-    FIXTURE[FIXTURE_LEVEL] = 0x5a;
-    assert((GPIOD->IDR & 0xff) == 0x5a);
+    FIXTURE[FIXTURE_LEVEL] = 0xa55a;
+    assert(GPIOD->IDR == 0xa55a);
     GPIOD->IDR = 0; /* read-only */
-    assert((GPIOD->IDR & 0xff) == 0x5a);
+    assert(GPIOD->IDR == 0xa55a);
     GPIOD->ODR = 0;
     GPIOD->BSRR = 3;
     assert(GPIOD->ODR == 3);
@@ -217,6 +272,7 @@ int main(void)
                       (analyzer_transport_t){.context = NULL, .write = send_bytes, .idle = idle, .cancel = cancel},
                       capture_stm32_timer_clock_hz());
     test_gpio();
+    test_word_capture_compacts_once();
     test_untriggered(4);
     test_untriggered(68);
     test_untriggered(CAPTURE_BUFFER_SAMPLES);
@@ -228,7 +284,10 @@ int main(void)
     test_reset_and_error();
     test_dma_error_at_completion();
     test_prescaled_sample_clock();
-    test_peripheral_increment_is_rejected();
+    test_invalid_dma_configuration(0, DMA_SxCR_PINC);
+    test_invalid_dma_configuration(DMA_SxCR_PSIZE | DMA_SxCR_MSIZE, 0); /* byte */
+    test_invalid_dma_configuration(DMA_SxCR_PSIZE | DMA_SxCR_MSIZE,
+                                    DMA_SxCR_PSIZE_0 | DMA_SxCR_MSIZE_0); /* half-word */
     puts("ALL STM32 CAPTURE TESTS PASSED");
     return 0;
 }

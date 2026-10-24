@@ -124,7 +124,7 @@ $(BUILD_DIR)/qemu/test_runtime_capture.elf: $(QEMU_RTOS_CAPTURE_SOURCES) $(wildc
 	@mkdir -p $(@D)
 	$(ARM_CC) $(QEMU_RTOS_FLAGS) $(INCLUDES) -DSTM32F407xx -DUSE_HAL_DRIVER \
 	 -DSTM32_CAPTURE_TEST -DANALYZER_RUNTIME_TEST -DRTOS_CAPTURE_TEST \
-	 $(QEMU_RTOS_CAPTURE_SOURCES) -nostartfiles --specs=rdimon.specs \
+	 $(QEMU_RTOS_CAPTURE_SOURCES) -nostartfiles --specs=nano.specs --specs=rdimon.specs \
 	 -Ttests/qemu/memory.ld -Wl,--gc-sections -o $@
 .PHONY: qemu-rtos-capture-test
 qemu-rtos-capture-test: $(BUILD_DIR)/qemu/test_runtime_capture.elf

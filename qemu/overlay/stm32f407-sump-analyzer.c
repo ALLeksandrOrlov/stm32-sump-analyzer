@@ -46,7 +46,7 @@ enum {
     DMA_LISR = 0, DMA_HISR = 1, DMA_LIFCR = 2, DMA_HIFCR = 3,
     DMA_STREAM5 = 0x88 / 4,
 };
-enum { STREAM_CR, STREAM_NDTR, STREAM_PAR, STREAM_M0AR };
+enum { STREAM_CR, STREAM_NDTR, STREAM_PAR, STREAM_M0AR, STREAM_M1AR, STREAM_FCR };
 enum {
     FIXTURE_ID, FIXTURE_LEVEL, FIXTURE_STEP, FIXTURE_AUTO_INCREMENT,
     FIXTURE_TICKS, FIXTURE_DMA_ERROR,
@@ -75,12 +75,15 @@ enum {
     DMA_PINC = 1 << 9,
     DMA_MINC = 1 << 10,
     DMA_PERIPHERAL_SIZE_MASK = 3 << 11,
+    DMA_PERIPHERAL_WORD = 2 << 11,
     DMA_MEMORY_SIZE_MASK = 3 << 13,
+    DMA_MEMORY_WORD = 2 << 13,
     DMA_CHANNEL_MASK = 7 << 25,
     DMA_CHANNEL6 = 6 << 25,
     DMA_TE = 1 << 9,
     DMA_HT = 1 << 10,
     DMA_TC = 1 << 11,
+    DMA_FIFO_ENABLED = 1 << 2,
 };
 enum { TIM8_UPDATE_IRQ = 44, DMA2_STREAM5_IRQ = 68, SYSCFG_PORT_D = 3 };
 
@@ -141,28 +144,31 @@ static void dma_request(AnalyzerState *s)
 {
     uint32_t *stream = dma_stream5(s);
     uint32_t control = stream[STREAM_CR];
-    uint32_t unsupported = DMA_DIRECTION_MASK | DMA_PINC |
-                           DMA_PERIPHERAL_SIZE_MASK | DMA_MEMORY_SIZE_MASK;
+    uint32_t unsupported = DMA_DIRECTION_MASK | DMA_PINC;
+    uint32_t sizes = DMA_PERIPHERAL_SIZE_MASK | DMA_MEMORY_SIZE_MASK;
 
     if (!(control & DMA_EN)) {
         return;
     }
-    /* TIM1_UP uses DMA2 stream 5/channel 6. Each request reads one byte from
-     * the fixed GPIO input address; peripheral increment is invalid here. */
+    /* TIM1_UP uses DMA2 stream 5/channel 6. GPIO IDR requires a word read
+     * (RM0090 section 8.4.5); direct mode stores one word per request. */
     if (s->inject_error || !stream[STREAM_NDTR] ||
         (control & DMA_CHANNEL_MASK) != DMA_CHANNEL6 ||
         (control & unsupported) ||
+        (control & sizes) != (DMA_PERIPHERAL_WORD | DMA_MEMORY_WORD) ||
+        (stream[STREAM_FCR] & DMA_FIFO_ENABLED) ||
+        (stream[STREAM_M0AR] & 3) ||
         stream[STREAM_PAR] != GPIOD_BASE + GPIO_IDR * sizeof(uint32_t)) {
         s->inject_error = false;
         dma_transfer_error(s);
         return;
     }
 
-    uint8_t sample = s->gpio[GPIO_IDR];
+    uint32_t sample = cpu_to_le32(s->gpio[GPIO_IDR]);
     hwaddr address = stream[STREAM_M0AR] +
-                     ((control & DMA_MINC) ? s->transferred : 0);
+                     ((control & DMA_MINC) ? s->transferred * sizeof(sample) : 0);
     if (address_space_write(&address_space_memory, address, MEMTXATTRS_UNSPECIFIED,
-                            &sample, 1) != MEMTX_OK) {
+                            &sample, sizeof(sample)) != MEMTX_OK) {
         dma_transfer_error(s);
         return;
     }
@@ -242,6 +248,10 @@ static uint64_t analyzer_read(void *opaque, hwaddr addr, unsigned size)
     unsigned reg = addr / 4;
     switch (r->kind) {
     case GPIO:
+        if (reg == GPIO_IDR && (size != 4 || (addr & 3))) {
+            qemu_log_mask(LOG_GUEST_ERROR, "analyzer: GPIO IDR requires aligned 32-bit reads\n");
+            return 0;
+        }
         if (reg < ARRAY_SIZE(s->gpio)) {
             value = s->gpio[reg];
         }

@@ -3,7 +3,9 @@
 #include <string.h>
 
 /* This adapter exclusively owns PD0..7, EXTI0..7, TIM1, TIM8, DMA2 stream 5. */
-static uint8_t sample_buffer[CAPTURE_BUFFER_SAMPLES] __attribute__((aligned(4)));
+/* RM0090 section 8.4.5 requires word accesses to GPIO IDR. DMA writes whole
+ * words; the application task compacts their low bytes after capture stops. */
+static uint32_t sample_buffer[CAPTURE_BUFFER_SAMPLES];
 static volatile capture_hw_event_t pending_event;
 static volatile bool capture_active;
 static volatile bool waiting_for_trigger;
@@ -96,9 +98,10 @@ static bool start(void *context, const capture_plan_t *plan)
     DMA2_Stream5->PAR = (uint32_t)&GPIOD->IDR;
     DMA2_Stream5->M0AR = (uint32_t)sample_buffer;
     DMA2_Stream5->NDTR = sample_count;
-    DMA2_Stream5->FCR = 0; /* Direct byte transfers: NDTR matches memory writes. */
+    DMA2_Stream5->FCR = 0; /* Direct words: one NDTR item is one GPIO sample. */
     DMA2_Stream5->CR = DMA_SxCR_CHSEL_1 | DMA_SxCR_CHSEL_2 |
-        DMA_SxCR_MINC | DMA_SxCR_PL_1 | DMA_SxCR_TEIE | DMA_SxCR_DMEIE |
+        DMA_SxCR_PSIZE_1 | DMA_SxCR_MSIZE_1 | DMA_SxCR_MINC |
+        DMA_SxCR_PL_1 | DMA_SxCR_TEIE | DMA_SxCR_DMEIE |
         (trigger_mask ? DMA_SxCR_CIRC : DMA_SxCR_TCIE);
 
     EXTI->RTSR = (EXTI->RTSR & ~SAMPLE_PIN_MASK) | (trigger_mask & plan->config.trigger_value);
@@ -126,6 +129,16 @@ static capture_hw_event_t poll(void *context)
     capture_hw_event_t result = pending_event;
     pending_event = CAPTURE_HW_NONE;
     __set_PRIMASK(mask);
+    if (result == CAPTURE_HW_COMPLETE) {
+        /* This task owns start/stop/poll. The completion ISR has already
+         * stopped DMA, so interrupts stay enabled during compaction. Forward
+         * writes only replace words already read, preserving ring positions.
+         * Consuming the event above ensures this happens exactly once. */
+        uint8_t *packed = (uint8_t *)sample_buffer;
+        for (uint32_t i = 0; i < sample_count; ++i) {
+            packed[i] = (uint8_t)sample_buffer[i];
+        }
+    }
     return result;
 }
 
@@ -133,7 +146,7 @@ static const uint8_t *buffer(void *context, uint32_t *next)
 {
     (void)context;
     *next = next_write_index;
-    return sample_buffer;
+    return (const uint8_t *)sample_buffer;
 }
 
 void capture_stm32_init(void)

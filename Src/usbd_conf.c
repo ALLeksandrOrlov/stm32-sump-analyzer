@@ -71,7 +71,9 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
   if(pcdHandle->Instance==USB_OTG_FS)
   {
   /* USER CODE BEGIN USB_OTG_FS_MspInit 0 */
-
+    /* HAL reads this setting after MSP init, before configuring the core.
+     * PA9 senses cable VBUS even while the board has a separate supply. */
+    pcdHandle->Init.vbus_sensing_enable = ENABLE;
   /* USER CODE END USB_OTG_FS_MspInit 0 */
   
     __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -93,6 +95,10 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* pcdHandle)
     HAL_NVIC_SetPriority(OTG_FS_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(OTG_FS_IRQn);
   /* USER CODE BEGIN USB_OTG_FS_MspInit 1 */
+    GPIO_InitStruct.Pin = GPIO_PIN_9;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
     usb_cdc_port_configure_irq();
   /* USER CODE END USB_OTG_FS_MspInit 1 */
   }
@@ -118,7 +124,7 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef* pcdHandle)
     HAL_NVIC_DisableIRQ(OTG_FS_IRQn);
 
   /* USER CODE BEGIN USB_OTG_FS_MspDeInit 1 */
-
+    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9);
   /* USER CODE END USB_OTG_FS_MspDeInit 1 */
   }
 }
