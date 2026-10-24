@@ -1,6 +1,10 @@
-/* Exercise the complete capture interrupt path with the real register driver,
- * deferred IRQ bridge, FreeRTOS tasks and message transport. Only USB and the
- * input signal source are fixtures; no test task polls the capture controller. */
+/**
+ * @file test_runtime_capture.c
+ * @brief Exercise real register access, capture IRQs and task wakeups together.
+ *
+ * Only USB and the input signal are fixtures. The stimulus never polls the
+ * controller, so a missing deferred interrupt cannot be hidden by the test.
+ */
 #include "analyzer_runtime.h"
 #include "capture_stm32.h"
 #include "capture_task_events.h"
@@ -17,7 +21,12 @@
 #define FIXTURE ((volatile uint32_t *)0x60000000u)
 enum { FIXTURE_ID, FIXTURE_LEVEL, FIXTURE_STEP, FIXTURE_AUTO_INCREMENT,
        FIXTURE_TICKS };
-enum { USB_CONNECT = 1u, USB_RECEIVE = 2u, USB_TRANSMIT = 4u };
+enum {
+    USB_CONNECT = 1u,
+    USB_RECEIVE = 2u,
+    USB_TRANSMIT = 4u,
+    USB_DISCONNECT = 8u
+};
 #define TEST_TIMEOUT pdMS_TO_TICKS(3000)
 #define WAIT_UNTIL(condition) \
     do { \
@@ -29,7 +38,10 @@ enum { USB_CONNECT = 1u, USB_RECEIVE = 2u, USB_TRANSMIT = 4u };
     } while (0)
 
 uint32_t SystemCoreClock = 168000000;
-uint32_t HAL_RCC_GetPCLK2Freq(void) { return 168000000; }
+uint32_t HAL_RCC_GetPCLK2Freq(void)
+{
+    return 168000000u;
+}
 static StaticTask_t stimulus_control;
 enum { STIMULUS_STACK_WORDS = 512 };
 static StackType_t stimulus_stack[STIMULUS_STACK_WORDS];
@@ -47,8 +59,10 @@ static volatile unsigned usb_events;
 static const uint8_t *usb_received;
 static size_t usb_received_length;
 static volatile bool usb_irq_finished;
-static volatile unsigned exti_interrupts, dma_interrupts;
-static volatile unsigned timer_interrupts, deferred_interrupts;
+static volatile unsigned exti_interrupts;
+static volatile unsigned dma_interrupts;
+static volatile unsigned timer_interrupts;
+static volatile unsigned deferred_interrupts;
 
 static void assert_capture_interrupt(IRQn_Type interrupt)
 {
@@ -63,11 +77,26 @@ void EXTI0_IRQHandler(void)
     capture_stm32_exti_irq();
 }
 
-void EXTI1_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI2_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI3_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
+void EXTI1_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+void EXTI2_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+void EXTI3_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+void EXTI4_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+void EXTI9_5_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
 
 void DMA2_Stream5_IRQHandler(void)
 {
@@ -129,24 +158,28 @@ static bool usb_idle(void *context)
     return !usb.active;
 }
 
-static void usb_rearm(void *context)
+static bool usb_rearm(void *context)
 {
     (void)context;
     assert(__get_IPSR() == 0 && !usb.out_credit);
     usb.out_credit = true;
+    return true;
 }
 
 void ANALYZER_TEST_IRQHandler(void)
 {
     assert(__get_IPSR() == 16);
     assert(NVIC_GetPriority(USB_TEST_IRQ) == 6);
-    if (usb_events & USB_CONNECT) {
+    if ((usb_events & USB_DISCONNECT) != 0u) {
+        analyzer_runtime_usb_disconnected_from_isr();
+    }
+    if ((usb_events & USB_CONNECT) != 0u) {
         analyzer_runtime_usb_connected_from_isr();
     }
-    if (usb_events & USB_RECEIVE) {
+    if ((usb_events & USB_RECEIVE) != 0u) {
         analyzer_runtime_usb_receive_from_isr(usb_received, usb_received_length);
     }
-    if (usb_events & USB_TRANSMIT) {
+    if ((usb_events & USB_TRANSMIT) != 0u) {
         analyzer_runtime_usb_tx_complete_from_isr();
     }
     usb_irq_finished = true;
@@ -285,6 +318,52 @@ static void test_reset_stops_armed_capture_without_spurious_event(void)
     assert(memcmp(usb.wire, "1ALS", 4) == 0);
 }
 
+
+static void test_disconnect_stops_armed_capture_and_allows_fresh_session(void)
+{
+    configure(64, 16, 1);
+    command(SUMP_RUN, 0);
+    WAIT_UNTIL(FIXTURE[FIXTURE_TICKS] >= 8u);
+    assert(!hardware_stopped());
+
+    usb.out_credit = false;
+    usb_interrupt(USB_DISCONNECT);
+    WAIT_UNTIL(hardware_stopped());
+    unsigned previous_deferred = deferred_interrupts;
+    FIXTURE[FIXTURE_LEVEL] = 1u;
+    vTaskDelay(2);
+    assert(deferred_interrupts == previous_deferred);
+    assert(!usb.active && !usb.out_credit);
+
+    usb.out_credit = true;
+    usb_interrupt(USB_CONNECT);
+    command(SUMP_ID, 0);
+    drain(4);
+    assert(memcmp(usb.wire, "1ALS", 4) == 0);
+    assert(hardware_stopped());
+}
+
+static void test_completed_capture_stays_immutable_during_host_pause(void)
+{
+    configure(68, 68, 0);
+    FIXTURE[FIXTURE_AUTO_INCREMENT] = 1u;
+    command(SUMP_RUN, 0);
+    WAIT_UNTIL(usb.active);
+    assert(hardware_stopped());
+    assert(usb.length == 64u);
+
+    /* A new RUN cannot reuse capture memory until both USB packets complete. */
+    FIXTURE[FIXTURE_LEVEL] = 0xffu;
+    command(SUMP_RUN, 0);
+    vTaskDelay(4);
+    assert(hardware_stopped());
+    assert_borrowed_packet_unchanged();
+    drain(68);
+    for (unsigned index = 0u; index < 68u; ++index) {
+        assert(usb.wire[index] == (uint8_t)(68u - index));
+    }
+}
+
 static void stimulus(void *argument)
 {
     (void)argument;
@@ -292,6 +371,8 @@ static void stimulus(void *argument)
     test_dma_completion_wakes_blocked_application();
     test_trigger_and_timer_completion_use_deferred_irq();
     test_reset_stops_armed_capture_without_spurious_event();
+    test_disconnect_stops_armed_capture_and_allows_fresh_session();
+    test_completed_capture_stays_immutable_during_host_pause();
     puts("ALL RTOS CAPTURE TESTS PASSED");
     /* Keep a measured margin after all test paths, including semihost output. */
     assert(uxTaskGetStackHighWaterMark2(NULL) >= 128);

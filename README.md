@@ -100,4 +100,4 @@ data, address, data bytes and acknowledgements together.
 This example uses a synthetic transaction to address `0x50`, writing `0x10`
 and `0x2A`. Your decoded values come from the connected bus.
 
-[Developer documentation](docs/README.md)
+[Developer documentation](docs/development.md)

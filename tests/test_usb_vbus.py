@@ -16,7 +16,7 @@ ROOT = Path(__file__).parents[1]
 def function_body(path, name):
     source = (ROOT / path).read_text()
     match = re.search(r"(?:static\s+)?(?:void|uint8_t|HAL_StatusTypeDef|USBD_StatusTypeDef)\s+" +
-                      re.escape(name) + r"\s*\([^;]*?\)\s*\{", source)
+                      re.escape(name) + r"\s*\([^;]*?\)\s*(?:#endif[^\n]*\n\s*)?\{", source)
     if not match:
         raise AssertionError(f"Function {name} not found in {path}")
     depth = 1
@@ -24,7 +24,9 @@ def function_body(path, name):
     while depth:
         depth += (source[end] == "{") - (source[end] == "}")
         end += 1
-    return source[match.start():end]
+    body = source[match.start():end]
+    # CubeMX places the callback-selection #endif between signature and body.
+    return re.sub(r"(?<=\))\s*#endif[^\n]*\n\s*(?=\{)", "\n", body)
 
 
 class UsbVbusTests(unittest.TestCase):
@@ -155,6 +157,46 @@ int main(void) {
         self.assertIn("vbus_sensing_enable", config["USB_OTG_FS.IPParameters"].split(","))
         pins = [config[f"Mcu.Pin{index}"] for index in range(int(config["Mcu.PinsNb"]))]
         self.assertEqual(pins.count("PA9"), 1)
+
+    def test_resume_ungates_phy_and_restores_state_before_notifying_tasks(self):
+        resume = function_body(
+            "Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c", "USBD_LL_Resume")
+        adapter = function_body("platform/stm32/usb_cdc_port.c", "usb_cdc_port_resume_from_isr")
+        callback = function_body("Src/usbd_conf.c", "HAL_PCD_ResumeCallback")
+        source = (ROOT / "Src/usbd_conf.c").read_text()
+        alias = re.search(r"^#define USBD_LL_Resume .+$", source, re.MULTILINE)
+        self.assertIsNotNone(alias)
+        self.run_c(r'''
+#include <assert.h>
+#include <stdint.h>
+#define USBD_OK 0
+#define USBD_STATE_SUSPENDED 4
+#define USBD_STATE_CONFIGURED 3
+typedef int USBD_StatusTypeDef;
+typedef struct { int dev_state, dev_old_state; } USBD_HandleTypeDef;
+typedef struct { void *pData; } PCD_HandleTypeDef;
+static USBD_HandleTypeDef device;
+static unsigned clock_ungated, notified;
+static void ungate_phy(PCD_HandleTypeDef *handle) {
+    assert(handle->pData == &device);
+    assert(device.dev_state == USBD_STATE_SUSPENDED && notified == 0);
+    ++clock_ungated;
+}
+#define __HAL_PCD_UNGATE_PHYCLOCK(handle) ungate_phy(handle)
+static void analyzer_runtime_usb_resumed_from_isr(void) {
+    assert(clock_ungated == 1 && device.dev_state == USBD_STATE_CONFIGURED);
+    ++notified;
+}
+''' + resume + "\n" + adapter + "\n" + alias[0] + "\n" + callback + r'''
+int main(void) {
+    PCD_HandleTypeDef controller = {.pData = &device};
+    device.dev_state = USBD_STATE_SUSPENDED;
+    device.dev_old_state = USBD_STATE_CONFIGURED;
+    HAL_PCD_ResumeCallback(&controller);
+    assert(clock_ungated == 1 && notified == 1);
+    assert(device.dev_state == USBD_STATE_CONFIGURED);
+}
+''')
 
     def test_disconnect_closes_endpoints_before_releasing_the_interface(self):
         functions = function_body(

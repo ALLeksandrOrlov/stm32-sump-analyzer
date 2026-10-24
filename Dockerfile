@@ -26,7 +26,7 @@ RUN /opt/qemu-src/configure --target-list=arm-softmmu --disable-docs \
 # Reusable CI image: project sources are mounted at runtime, so test runs never
 # disappear behind a Docker RUN cache hit. QEMU is cached independently.
 FROM toolchain AS ci
-RUN apt-get update && apt-get install -y --no-install-recommends gcovr \
+RUN apt-get update && apt-get install -y --no-install-recommends gcovr cppcheck \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=qemu-builder /opt/qemu-build/qemu-system-arm /usr/local/bin/qemu-system-arm-sump-analyzer
 WORKDIR /project

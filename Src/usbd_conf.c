@@ -27,6 +27,8 @@
 
 /* USER CODE BEGIN Includes */
 #include "usb_cdc_port.h"
+/* Wrap the generated call so tasks are notified after device state restoration. */
+#define USBD_LL_Resume usb_cdc_port_resume_from_isr
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -257,7 +259,8 @@ void HAL_PCD_ResumeCallback(PCD_HandleTypeDef *hpcd)
 #endif /* USE_HAL_PCD_REGISTER_CALLBACKS */
 {
   /* USER CODE BEGIN 3 */
-
+  /* The suspend callback gates this clock, including normal USB suspend. */
+  __HAL_PCD_UNGATE_PHYCLOCK(hpcd);
   /* USER CODE END 3 */
   USBD_LL_Resume((USBD_HandleTypeDef*)hpcd->pData);
 }

@@ -1,136 +1,137 @@
+/** @file capture.c @brief Event-condition-action capture controller. */
 #include "capture.h"
-#include <string.h>
 
-enum {
-    TIMER_REGISTER_VALUES = 65536u,
-    NANOSECONDS_PER_SECOND = 1000000000u
-};
-
-void capture_config_default(capture_config_t *config)
+static bool capture_is_active(capture_state_t state)
 {
-    *config = (capture_config_t){
-        .sample_period_ns = 1000, /* 1 MHz. */
-        .samples = 1024,
-        .post_trigger = 1024,
-        .trigger_mask = 0,
-        .trigger_value = 0
-    };
+    return (state == CAPTURE_ARMED) || (state == CAPTURE_RUNNING);
 }
 
-static uint64_t divide_round_up(uint64_t numerator, uint64_t denominator)
+/** Keep state guards independent of hardware actions and error handling. */
+static bool event_is_allowed(capture_state_t state, capture_event_t event)
 {
-    return (numerator + denominator - 1u) / denominator;
+    bool allowed = false;
+
+    switch (event) {
+    case CAPTURE_EVENT_RUN:
+        allowed = (state == CAPTURE_IDLE);
+        break;
+    case CAPTURE_EVENT_TRIGGER:
+        allowed = (state == CAPTURE_ARMED);
+        break;
+    case CAPTURE_EVENT_COMPLETE:
+        allowed = capture_is_active(state);
+        break;
+    case CAPTURE_EVENT_SENT:
+        allowed = (state == CAPTURE_SENDING);
+        break;
+    case CAPTURE_EVENT_RESET:
+    case CAPTURE_EVENT_ERROR:
+        allowed = true;
+        break;
+    default:
+        break;
+    }
+    return allowed;
 }
 
-static bool config_is_valid(const capture_config_t *config)
+static void stop_capture(capture_controller_t *controller, capture_state_t state)
 {
-    bool multiple_trigger_channels =
-        (config->trigger_mask & (config->trigger_mask - 1u)) != 0;
-    return config->sample_period_ns > 0 &&
-        config->samples > 0 && config->samples <= CAPTURE_BUFFER_SAMPLES &&
-        config->post_trigger > 0 && config->post_trigger <= config->samples &&
-        config->trigger_mask <= UINT8_MAX &&
-        !multiple_trigger_channels;
+    controller->driver.stop(controller->driver.context);
+    controller->state = state;
 }
 
-bool capture_make_plan(const capture_config_t *config, uint32_t timer_clock_hz,
-                       capture_plan_t *plan)
+static bool start_capture(capture_controller_t *controller,
+                          const capture_config_t *config)
 {
-    if (timer_clock_hz == 0 || !config_is_valid(config)) {
-        return false;
+    bool started = false;
+
+    if ((config != NULL) &&
+        capture_make_plan(config, controller->timer_clock_hz, &controller->plan)) {
+        started = controller->driver.start(controller->driver.context,
+                                            &controller->plan);
     }
 
-    uint64_t ticks = divide_round_up(
-        (uint64_t)timer_clock_hz * config->sample_period_ns, NANOSECONDS_PER_SECOND);
-    uint64_t minimum = divide_round_up(timer_clock_hz, CAPTURE_MAX_SAMPLE_RATE_HZ);
-    if (ticks < minimum) {
-        ticks = minimum;
+    if (started) {
+        controller->state = (controller->plan.config.trigger_mask == 0U)
+            ? CAPTURE_RUNNING : CAPTURE_ARMED;
+    } else {
+        /* start() can fail after enabling DMA or an interrupt. */
+        stop_capture(controller, CAPTURE_ERROR);
     }
-    if (ticks > (uint64_t)TIMER_REGISTER_VALUES * TIMER_REGISTER_VALUES) {
-        return false;
-    }
-
-    /* Choose the smallest prescaler that fits the reload register, rounding
-     * both divisions upward so quantization can only slow the sample clock. */
-    uint64_t prescaler = divide_round_up(ticks, TIMER_REGISTER_VALUES);
-    uint64_t reload = divide_round_up(ticks, prescaler);
-    plan->config = *config;
-    plan->prescaler = (uint16_t)(prescaler - 1u);
-    plan->reload = (uint16_t)(reload - 1u);
-    return true;
+    return started;
 }
 
 void capture_controller_init(capture_controller_t *controller,
                              capture_driver_t driver, uint32_t timer_clock_hz)
 {
-    memset(controller, 0, sizeof(*controller));
-    controller->driver = driver;
-    controller->timer_clock_hz = timer_clock_hz;
+    *controller = (capture_controller_t){
+        .state = CAPTURE_IDLE,
+        .driver = driver,
+        .timer_clock_hz = timer_clock_hz
+    };
 }
 
 bool capture_dispatch(capture_controller_t *controller, capture_event_t event,
                       const capture_config_t *config)
 {
-    switch (event) {
-    case CAPTURE_EVENT_RESET:
-        controller->driver.stop(controller->driver.context);
-        controller->state = CAPTURE_IDLE;
-        return true;
-    case CAPTURE_EVENT_RUN:
-        if (controller->state != CAPTURE_IDLE) {
-            return false;
-        }
-        if (!config || !capture_make_plan(config, controller->timer_clock_hz, &controller->plan) ||
-            !controller->driver.start(controller->driver.context, &controller->plan)) {
-            controller->driver.stop(controller->driver.context);
-            controller->state = CAPTURE_ERROR;
-            return false;
-        }
-        controller->state = config->trigger_mask ? CAPTURE_ARMED : CAPTURE_RUNNING;
-        return true;
-    case CAPTURE_EVENT_TRIGGER:
-        if (controller->state != CAPTURE_ARMED) {
-            return false;
-        }
-        controller->state = CAPTURE_RUNNING;
-        return true;
-    case CAPTURE_EVENT_COMPLETE:
-        /* The ISR may have both triggered and completed before the next poll. */
-        if (controller->state != CAPTURE_ARMED && controller->state != CAPTURE_RUNNING) {
-            return false;
-        }
-        controller->state = CAPTURE_SENDING;
-        return true;
-    case CAPTURE_EVENT_SENT:
-        if (controller->state != CAPTURE_SENDING) {
-            return false;
-        }
-        controller->state = CAPTURE_IDLE;
-        return true;
-    case CAPTURE_EVENT_ERROR:
-        controller->driver.stop(controller->driver.context);
-        controller->state = CAPTURE_ERROR;
-        return true;
+    bool applied = false;
+
+    if (!event_is_allowed(controller->state, event)) {
+        return false;
     }
-    return false;
+
+    switch (event) {
+    case CAPTURE_EVENT_RUN:
+        applied = start_capture(controller, config);
+        break;
+    case CAPTURE_EVENT_RESET:
+        stop_capture(controller, CAPTURE_IDLE);
+        applied = true;
+        break;
+    case CAPTURE_EVENT_TRIGGER:
+        controller->state = CAPTURE_RUNNING;
+        applied = true;
+        break;
+    case CAPTURE_EVENT_COMPLETE:
+        controller->state = CAPTURE_SENDING;
+        applied = true;
+        break;
+    case CAPTURE_EVENT_SENT:
+        controller->state = CAPTURE_IDLE;
+        applied = true;
+        break;
+    case CAPTURE_EVENT_ERROR:
+        stop_capture(controller, CAPTURE_ERROR);
+        applied = true;
+        break;
+    default:
+        break;
+    }
+    return applied;
 }
 
 void capture_poll(capture_controller_t *controller)
 {
-    if (controller->state != CAPTURE_ARMED && controller->state != CAPTURE_RUNNING) {
+    capture_hw_event_t event;
+
+    if (!capture_is_active(controller->state)) {
         return;
     }
-    switch (controller->driver.poll(controller->driver.context)) {
+
+    event = controller->driver.poll(controller->driver.context);
+    switch (event) {
+    case CAPTURE_HW_NONE:
+        break;
     case CAPTURE_HW_TRIGGERED:
-        capture_dispatch(controller, CAPTURE_EVENT_TRIGGER, NULL);
+        (void)capture_dispatch(controller, CAPTURE_EVENT_TRIGGER, NULL);
         break;
     case CAPTURE_HW_COMPLETE:
-        capture_dispatch(controller, CAPTURE_EVENT_COMPLETE, NULL);
+        (void)capture_dispatch(controller, CAPTURE_EVENT_COMPLETE, NULL);
         break;
     case CAPTURE_HW_ERROR:
-        capture_dispatch(controller, CAPTURE_EVENT_ERROR, NULL);
-        break;
-    case CAPTURE_HW_NONE:
+    default:
+        /* An invalid driver event is a contract failure: stop the hardware. */
+        (void)capture_dispatch(controller, CAPTURE_EVENT_ERROR, NULL);
         break;
     }
 }
@@ -138,23 +139,33 @@ void capture_poll(capture_controller_t *controller)
 size_t capture_read_reverse(capture_controller_t *controller, uint32_t offset,
                             uint8_t *output, size_t capacity)
 {
-    uint32_t next = 0;
-    uint32_t count = controller->plan.config.samples;
-    if (controller->state != CAPTURE_SENDING || offset >= count || capacity == 0) {
-        return 0;
+    const uint32_t sample_count = controller->plan.config.samples;
+    const uint8_t *samples;
+    uint32_t next_write = 0U;
+    uint32_t read_index;
+    size_t copy_length;
+
+    if ((controller->state != CAPTURE_SENDING) || (offset >= sample_count) ||
+        (capacity == 0U)) {
+        return 0U;
     }
-    const uint8_t *buffer = controller->driver.buffer(controller->driver.context, &next);
-    if (!buffer || next > count) {
-        return 0;
+
+    samples = controller->driver.buffer(controller->driver.context, &next_write);
+    if ((samples == NULL) || (next_write > sample_count)) {
+        return 0U;
     }
-    size_t length = count - offset;
-    if (length > capacity) {
-        length = capacity;
+
+    copy_length = (size_t)(sample_count - offset);
+    if (copy_length > capacity) {
+        copy_length = capacity;
     }
-    uint32_t index = (next + count - 1u - offset) % count;
-    for (size_t i = 0; i < length; ++i) {
-        output[i] = buffer[index];
-        index = index ? index - 1u : count - 1u;
+
+    /* The validated count is small enough that this sum cannot overflow.
+     * One modulo finds the start; advancing each sample uses only a branch. */
+    read_index = (next_write + sample_count - 1U - offset) % sample_count;
+    for (size_t copied = 0U; copied < copy_length; ++copied) {
+        output[copied] = samples[read_index];
+        read_index = (read_index == 0U) ? (sample_count - 1U) : (read_index - 1U);
     }
-    return length;
+    return copy_length;
 }

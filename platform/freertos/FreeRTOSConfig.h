@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+/** @file FreeRTOSConfig.h
+ * @brief Static, preemptive scheduler configuration for the STM32F407.
+ */
+
 /* The board and the QEMU capture machine run the Cortex-M4F at 168 MHz. */
 #define configCPU_CLOCK_HZ                       168000000u
 #define configTICK_RATE_HZ                       1000u
@@ -73,6 +77,10 @@
 
 _Noreturn void freertos_assert_failed(const char *file, uint32_t line);
 #define configASSERT(condition) \
-    do { if (!(condition)) freertos_assert_failed(__FILE__, __LINE__); } while (0)
+    do { \
+        if (!(condition)) { \
+            freertos_assert_failed(__FILE__, __LINE__); \
+        } \
+    } while (0)
 
 #endif

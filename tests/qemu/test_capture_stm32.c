@@ -19,19 +19,62 @@ static size_t wire_length;
 static uint32_t expected_ramp_samples;
 uint32_t SystemCoreClock = 168000000;
 /* The model has a fixed timer clock. PLL/RCC startup is outside these tests. */
-uint32_t HAL_RCC_GetPCLK2Freq(void) { return 168000000; }
+uint32_t HAL_RCC_GetPCLK2Freq(void)
+{
+    return 168000000U;
+}
 
-void EXTI0_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI1_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI2_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI3_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI4_IRQHandler(void) { capture_stm32_exti_irq(); }
-void EXTI9_5_IRQHandler(void) { capture_stm32_exti_irq(); }
-void TIM8_UP_TIM13_IRQHandler(void) { capture_stm32_tim8_update_irq(); }
-void DMA2_Stream5_IRQHandler(void) { capture_stm32_dma2_stream5_irq(); }
-static bool idle(void *ctx) { (void)ctx; return true; }
+void EXTI0_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void EXTI1_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void EXTI2_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void EXTI3_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void EXTI4_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void EXTI9_5_IRQHandler(void)
+{
+    capture_stm32_exti_irq();
+}
+
+void TIM8_UP_TIM13_IRQHandler(void)
+{
+    capture_stm32_tim8_update_irq();
+}
+
+void DMA2_Stream5_IRQHandler(void)
+{
+    capture_stm32_dma2_stream5_irq();
+}
+
+static bool idle(void *context)
+{
+    (void)context;
+    return true;
+}
+
 /* The memory transport delivers synchronously, so cancellation has no queue. */
-static void cancel(void *ctx) { (void)ctx; }
+static void cancel(void *context)
+{
+    (void)context;
+}
 static bool send_bytes(void *ctx, const uint8_t *data, size_t size)
 {
     (void)ctx;
@@ -50,9 +93,11 @@ static bool send_bytes(void *ctx, const uint8_t *data, size_t size)
 static void command(uint8_t opcode, uint32_t value)
 {
     assert(analyzer_app_receive(&app, opcode));
-    if (opcode & 0x80)
-        for (unsigned i = 0; i < 4; ++i)
-            assert(analyzer_app_receive(&app, (uint8_t)(value >> (8 * i))));
+    if ((opcode & 0x80U) != 0U) {
+        for (unsigned byte = 0U; byte < 4U; ++byte) {
+            assert(analyzer_app_receive(&app, (uint8_t)(value >> (8U * byte))));
+        }
+    }
 }
 static void setup(uint32_t count, uint8_t mask, uint8_t value)
 {
@@ -72,11 +117,35 @@ static void wait_complete(void)
 {
     for (unsigned i = 0; i < 50000000; ++i) {
         analyzer_app_poll(&app);
-        if (app.capture.state == CAPTURE_IDLE) return;
+        if (app.capture.state == CAPTURE_IDLE) {
+            return;
+        }
         assert(app.capture.state != CAPTURE_ERROR);
     }
     assert(!"capture timed out");
 }
+static void wait_for_sample_ticks(uint32_t count)
+{
+    for (uint32_t poll = 0U; poll < 50000000U; ++poll) {
+        analyzer_app_poll(&app);
+        if (FIXTURE[FIXTURE_TICKS] >= count) {
+            return;
+        }
+    }
+    assert(!"sample timer did not progress");
+}
+
+static void wait_for_capture_state(capture_state_t expected)
+{
+    for (uint32_t poll = 0U; poll < 50000000U; ++poll) {
+        analyzer_app_poll(&app);
+        if (app.capture.state == expected) {
+            return;
+        }
+    }
+    assert(!"capture did not reach expected state");
+}
+
 static void assert_stopped(void)
 {
     assert(!(TIM1->CR1 & TIM_CR1_CEN));
@@ -147,7 +216,7 @@ static void test_edge(uint8_t pin, bool rising)
     command(SUMP_COUNTS, (3u << 16) | 15u); /* 64 total, 16 post-trigger. */
     command(SUMP_RUN, 0);
     assert(app.capture.state == CAPTURE_ARMED);
-    while (FIXTURE[FIXTURE_TICKS] < 80) analyzer_app_poll(&app); /* wrap the DMA ring */
+    wait_for_sample_ticks(80U); /* Wrap the DMA ring before triggering. */
     assert(app.capture.state == CAPTURE_ARMED);
     FIXTURE[FIXTURE_LEVEL] = after;
     wait_complete();
@@ -155,9 +224,13 @@ static void test_edge(uint8_t pin, bool rising)
     /* The newest post-trigger samples have the new level. Older pre-trigger
      * samples remain at the old level; this exercises actual circular DMA. */
     unsigned post = 0;
-    while (post < 64 && wire[post] == after) ++post;
+    while ((post < 64U) && (wire[post] == after)) {
+        ++post;
+    }
     assert(post >= 16 && post <= 17); /* one sample tolerance for IRQ phase */
-    for (unsigned i = post; i < 64; ++i) assert(wire[i] == before);
+    for (unsigned index = post; index < 64U; ++index) {
+        assert(wire[index] == before);
+    }
     assert_stopped();
 }
 static void test_trigger_ignores_other_edges(void)
@@ -168,7 +241,7 @@ static void test_trigger_ignores_other_edges(void)
     /* A falling edge on the selected pin and a rising edge on another pin
      * must leave a rising-edge capture armed. */
     FIXTURE[FIXTURE_LEVEL] = 2;
-    while (FIXTURE[FIXTURE_TICKS] < 8) analyzer_app_poll(&app);
+    wait_for_sample_ticks(8U);
     assert(app.capture.state == CAPTURE_ARMED && wire_length == 0);
     FIXTURE[FIXTURE_LEVEL] = 3;
     wait_complete();
@@ -179,15 +252,14 @@ static void test_reset_and_error(void)
 {
     setup(64, 1, 1);
     command(SUMP_RUN, 0);
-    while (FIXTURE[FIXTURE_TICKS] < 8) analyzer_app_poll(&app);
+    wait_for_sample_ticks(8U);
     command(SUMP_RESET, 0);
     assert_stopped();
     assert(app.capture.state == CAPTURE_IDLE && wire_length == 0);
     setup(64, 0, 0);
     FIXTURE[FIXTURE_DMA_ERROR] = 1;
     command(SUMP_RUN, 0);
-    for (unsigned i = 0; i < 1000000 && app.capture.state != CAPTURE_ERROR; ++i)
-        analyzer_app_poll(&app);
+    wait_for_capture_state(CAPTURE_ERROR);
     assert(app.capture.state == CAPTURE_ERROR);
     assert_stopped();
     assert(wire_length == 0);
@@ -201,14 +273,16 @@ static void test_dma_error_at_completion(void)
     setup(64, 1, 1);
     command(SUMP_RUN, 0);
     FIXTURE[FIXTURE_LEVEL] = 1;
-    while (app.capture.state == CAPTURE_ARMED) analyzer_app_poll(&app);
+    wait_for_capture_state(CAPTURE_RUNNING);
     assert(app.capture.state == CAPTURE_RUNNING);
 
     __disable_irq();
     TIM8->CNT = TIM8->ARR;
     FIXTURE[FIXTURE_DMA_ERROR] = 1;
     uint32_t ticks = FIXTURE[FIXTURE_TICKS];
-    while (FIXTURE[FIXTURE_TICKS] == ticks) {}
+    for (uint32_t poll = 0U; FIXTURE[FIXTURE_TICKS] == ticks; ++poll) {
+        assert(poll < 50000000U);
+    }
     __enable_irq();
 
     analyzer_app_poll(&app);
@@ -230,8 +304,7 @@ static void test_invalid_dma_configuration(uint32_t clear, uint32_t set)
     DMA2_Stream5->CR |= DMA_SxCR_EN;
     TIM1->CR1 |= TIM_CR1_CEN;
     __enable_irq();
-    for (unsigned i = 0; i < 1000000 && app.capture.state != CAPTURE_ERROR; ++i)
-        analyzer_app_poll(&app);
+    wait_for_capture_state(CAPTURE_ERROR);
     assert(app.capture.state == CAPTURE_ERROR);
     assert(wire_length == 0);
     assert_stopped();
@@ -248,7 +321,9 @@ static void test_prescaled_sample_clock(void)
     assert((TIM1->PSC + 1u) * (TIM1->ARR + 1u) == 168000u);
     wait_complete();
     assert(wire_length == 4);
-    for (unsigned i = 0; i < 4; ++i) assert(wire[i] == 4 - i);
+    for (unsigned index = 0U; index < 4U; ++index) {
+        assert(wire[index] == 4U - index);
+    }
     assert_stopped();
 }
 
@@ -264,6 +339,60 @@ static void test_gpio(void)
     GPIOD->BSRR = 1u << 16;
     assert(GPIOD->ODR == 2);
 }
+static void test_invalid_plan_stops_without_starting_dma(void)
+{
+    setup(4U, 0U, 0U);
+    const capture_driver_t driver = capture_stm32_driver();
+    capture_config_t config;
+    capture_config_default(&config);
+    config.samples = 8U;
+    config.post_trigger = 8U;
+    config.sample_period_ns = 10000U;
+    capture_plan_t valid;
+    assert(capture_make_plan(&config, capture_stm32_timer_clock_hz(), &valid));
+
+    capture_plan_t invalid[] = {valid, valid, valid, valid, valid, valid};
+    invalid[0].config.samples = 0U;
+    invalid[1].config.samples = CAPTURE_BUFFER_SAMPLES + 1U;
+    invalid[2].config.post_trigger = 0U;
+    invalid[3].config.post_trigger = 9U;
+    invalid[4].config.trigger_mask = 0x100U;
+    invalid[5].config.trigger_mask = 0x03U;
+    for (size_t index = 0U; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        assert(!driver.start(driver.context, &invalid[index]));
+        assert_stopped();
+        assert(driver.poll(driver.context) == CAPTURE_HW_NONE);
+    }
+    assert(!driver.start(driver.context, NULL));
+    assert_stopped();
+    test_untriggered(4U);
+}
+
+static void test_stop_discards_pending_completion(void)
+{
+    setup(4U, 0U, 0U);
+    const capture_driver_t driver = capture_stm32_driver();
+    capture_config_t config;
+    capture_config_default(&config);
+    config.samples = 4U;
+    config.post_trigger = 4U;
+    config.sample_period_ns = 10000U;
+    capture_plan_t plan;
+    assert(capture_make_plan(&config, capture_stm32_timer_clock_hz(), &plan));
+    assert(driver.start(driver.context, &plan));
+    /* Let DMA finish without consuming its completion through the task. */
+    for (uint32_t poll = 0U; (TIM1->CR1 & TIM_CR1_CEN) != 0U; ++poll) {
+        assert(poll < 50000000U);
+    }
+    driver.stop(driver.context);
+    capture_stm32_exti_irq();
+    capture_stm32_tim8_update_irq();
+    capture_stm32_dma2_stream5_irq();
+    assert(driver.poll(driver.context) == CAPTURE_HW_NONE);
+    assert_stopped();
+    test_untriggered(4U);
+}
+
 int main(void)
 {
     assert(FIXTURE[FIXTURE_ID] == 0x534c4131);
@@ -272,6 +401,8 @@ int main(void)
                       (analyzer_transport_t){.context = NULL, .write = send_bytes, .idle = idle, .cancel = cancel},
                       capture_stm32_timer_clock_hz());
     test_gpio();
+    test_invalid_plan_stops_without_starting_dma();
+    test_stop_discards_pending_completion();
     test_word_capture_compacts_once();
     test_untriggered(4);
     test_untriggered(68);

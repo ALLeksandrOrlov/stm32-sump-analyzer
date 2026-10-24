@@ -1,41 +1,79 @@
+/** @file analyzer_app.c @brief Bounded application service for one SUMP session. */
 #include "analyzer_app.h"
 
 #include <string.h>
 
-enum {
-    UNUSED_CHANNEL_GROUPS = SUMP_FLAG_DISABLE_GROUP_1 |
-        SUMP_FLAG_DISABLE_GROUP_2 | SUMP_FLAG_DISABLE_GROUP_3,
-    SUPPORTED_FLAGS = UNUSED_CHANNEL_GROUPS | SUMP_FLAG_FILTER_HINT
-};
+#define ABSENT_CHANNEL_GROUPS (SUMP_FLAG_DISABLE_GROUP_1 | \
+    SUMP_FLAG_DISABLE_GROUP_2 | SUMP_FLAG_DISABLE_GROUP_3)
+#define SUPPORTED_SUMP_FLAGS (ABSENT_CHANNEL_GROUPS | SUMP_FLAG_FILTER_HINT)
+#define SUMP_COUNT_FIELD_MASK UINT32_C(0x0000ffff)
+#define SUMP_POST_TRIGGER_SHIFT 16U
+
+_Static_assert(SUMP_METADATA_MAX_BYTES <= ANALYZER_TRANSFER_BYTES,
+               "Application reply storage must hold SUMP metadata");
+
+static void reset_session(analyzer_app_t *app)
+{
+    sump_parser_reset(&app->parser);
+    capture_config_default(&app->config);
+    app->sump_flags = ABSENT_CHANNEL_GROUPS;
+    app->reply_length = 0U;
+    app->samples_sent = 0U;
+}
 
 void analyzer_app_init(analyzer_app_t *app, capture_driver_t driver,
                        analyzer_transport_t transport, uint32_t timer_clock_hz)
 {
-    memset(app, 0, sizeof(*app));
-    app->transport = transport;
+    *app = (analyzer_app_t){.transport = transport};
     capture_controller_init(&app->capture, driver, timer_clock_hz);
-    capture_config_default(&app->config);
-    app->sump_flags = UNUSED_CHANNEL_GROUPS;
+    reset_session(app);
 }
 
 void analyzer_app_reset(analyzer_app_t *app)
 {
-    capture_dispatch(&app->capture, CAPTURE_EVENT_RESET, NULL);
+    (void)capture_dispatch(&app->capture, CAPTURE_EVENT_RESET, NULL);
     app->transport.cancel(app->transport.context);
-    sump_parser_reset(&app->parser);
-    capture_config_default(&app->config);
-    app->sump_flags = UNUSED_CHANNEL_GROUPS;
-    app->reply_length = 0;
-    app->samples_sent = 0;
+    reset_session(app);
 }
 
-static void finish_capture_if_idle(analyzer_app_t *app)
+static void finish_delivered_capture(analyzer_app_t *app)
 {
-    if (app->capture.state == CAPTURE_SENDING &&
-        app->samples_sent == app->capture.plan.config.samples &&
+    if ((app->capture.state == CAPTURE_SENDING) &&
+        (app->samples_sent == app->capture.plan.config.samples) &&
         app->transport.idle(app->transport.context)) {
-        capture_dispatch(&app->capture, CAPTURE_EVENT_SENT, NULL);
+        (void)capture_dispatch(&app->capture, CAPTURE_EVENT_SENT, NULL);
     }
+}
+
+static void request_capture(analyzer_app_t *app)
+{
+    const capture_config_t *requested_config = NULL;
+
+    /* The host can issue RUN immediately after reading the final sample, before
+     * this task has observed the corresponding USB completion notification. */
+    finish_delivered_capture(app);
+
+    /* libsigrok requests its FPGA input filter below 100 MHz. Accept that bit
+     * as a hint, since GPIO sampling cannot implement the FPGA filter. Reject
+     * other unsupported modes, including disabling the only available group. */
+    if ((app->sump_flags & ~SUPPORTED_SUMP_FLAGS) == 0U) {
+        requested_config = &app->config;
+    }
+
+    /* The controller checks the state before the configuration. A repeated RUN
+     * cannot stop an active capture, even when pending settings are invalid. */
+    if (capture_dispatch(&app->capture, CAPTURE_EVENT_RUN, requested_config)) {
+        app->samples_sent = 0U;
+    }
+}
+
+static void prepare_identity_reply(analyzer_app_t *app)
+{
+    size_t length;
+    const uint8_t *bytes = sump_identity(&length);
+
+    memcpy(app->reply, bytes, length);
+    app->reply_length = length;
 }
 
 static void apply_command(analyzer_app_t *app, const sump_command_t *command)
@@ -44,40 +82,25 @@ static void apply_command(analyzer_app_t *app, const sump_command_t *command)
     case SUMP_RESET:
         analyzer_app_reset(app);
         break;
-    case SUMP_RUN: {
-        /* A host can send RUN as soon as it receives the final bytes, before
-         * the application has polled the transport's completion notification. */
-        finish_capture_if_idle(app);
-        /* libsigrok requests its FPGA filter below 100 MHz. Raw GPIO samples
-         * cannot implement that filter, so this flag is accepted as a hint.
-         * Disabling absent channel groups is safe; all other flags are errors.
-         * NULL rejects invalid options through the controller's RUN guard,
-         * which must ignore new requests while a capture is already active. */
-        const capture_config_t *config =
-            (app->sump_flags & (uint32_t)~SUPPORTED_FLAGS) == 0 ? &app->config : NULL;
-        if (capture_dispatch(&app->capture, CAPTURE_EVENT_RUN, config)) {
-            app->samples_sent = 0;
-        }
+    case SUMP_RUN:
+        request_capture(app);
         break;
-    }
-    case SUMP_ID: {
-        size_t length;
-        const uint8_t *identity = sump_identity(&length);
-        memcpy(app->reply, identity, length);
-        app->reply_length = length;
+    case SUMP_ID:
+        prepare_identity_reply(app);
         break;
-    }
     case SUMP_META:
         app->reply_length = sump_metadata(app->reply, sizeof(app->reply),
-                                          CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ);
+            CAPTURE_BUFFER_SAMPLES, CAPTURE_MAX_SAMPLE_RATE_HZ);
         break;
     case SUMP_DIVIDER:
         app->config.sample_period_ns =
-            ((command->value & SUMP_DIVIDER_MASK) + 1u) * SUMP_CLOCK_PERIOD_NS;
+            ((command->value & SUMP_DIVIDER_MASK) + 1U) * SUMP_CLOCK_PERIOD_NS;
         break;
     case SUMP_COUNTS:
-        app->config.samples = ((command->value & 0xffffu) + 1u) * SUMP_COUNT_UNIT_SAMPLES;
-        app->config.post_trigger = ((command->value >> 16) + 1u) * SUMP_COUNT_UNIT_SAMPLES;
+        app->config.samples =
+            ((command->value & SUMP_COUNT_FIELD_MASK) + 1U) * SUMP_COUNT_UNIT_SAMPLES;
+        app->config.post_trigger =
+            ((command->value >> SUMP_POST_TRIGGER_SHIFT) + 1U) * SUMP_COUNT_UNIT_SAMPLES;
         break;
     case SUMP_FLAGS:
         app->sump_flags = command->value;
@@ -86,51 +109,81 @@ static void apply_command(analyzer_app_t *app, const sump_command_t *command)
         app->config.trigger_mask = command->value;
         break;
     case SUMP_TRIGGER_VALUE:
-        app->config.trigger_value = (uint8_t)command->value;
+        app->config.trigger_value = (uint8_t)(command->value & UINT8_MAX);
         break;
     default:
-        /* Framing unknown commands keeps subsequent commands synchronized. */
+        /* Unknown commands still consume their complete frame in the parser. */
         break;
     }
 }
 
 bool analyzer_app_receive(analyzer_app_t *app, uint8_t byte)
 {
-    if (app->reply_length != 0) {
+    sump_command_t command;
+
+    /* A pending reply exists only at a command boundary. RESET must remain
+     * available when a host stops reading; it cancels that reply and queued
+     * capture data. Other bytes stay pending until their response has room. */
+    if ((app->reply_length != 0U) && (byte != SUMP_RESET)) {
         return false;
     }
-
-    sump_command_t command;
     if (sump_parser_push(&app->parser, byte, &command)) {
         apply_command(app, &command);
     }
     return true;
 }
 
-void analyzer_app_poll(analyzer_app_t *app)
+static bool queue_capture_packet(analyzer_app_t *app)
 {
+    size_t length;
+
+    if (app->samples_sent == app->capture.plan.config.samples) {
+        return false;
+    }
+
+    length = capture_read_reverse(&app->capture, app->samples_sent,
+                                   app->tx, sizeof(app->tx));
+    if (length == 0U) {
+        (void)capture_dispatch(&app->capture, CAPTURE_EVENT_ERROR, NULL);
+        return false;
+    }
+    if (!app->transport.write(app->transport.context, app->tx, length)) {
+        return false;
+    }
+
+    /* length is bounded by sizeof(tx), and the total by the validated plan. */
+    app->samples_sent += (uint32_t)length;
+    return true;
+}
+
+static bool queue_control_reply(analyzer_app_t *app)
+{
+    bool accepted = false;
+
+    if (app->reply_length != 0U) {
+        accepted = app->transport.write(app->transport.context,
+                                         app->reply, app->reply_length);
+        if (accepted) {
+            app->reply_length = 0U;
+        }
+    }
+    return accepted;
+}
+
+bool analyzer_app_poll(analyzer_app_t *app)
+{
+    const capture_state_t previous_state = app->capture.state;
+    bool packet_accepted;
+
     capture_poll(&app->capture);
-    finish_capture_if_idle(app);
-    /* A capture is one continuous response. Control replies wait until its
-     * final packet completes, even after every sample has entered the queue. */
+    finish_delivered_capture(app);
+
+    /* A capture owns the response stream until every sample is delivered. */
     if (app->capture.state == CAPTURE_SENDING) {
-        if (app->samples_sent == app->capture.plan.config.samples) {
-            return;
-        }
-        size_t length = capture_read_reverse(
-            &app->capture, app->samples_sent, app->tx, sizeof(app->tx));
-        if (length == 0) {
-            capture_dispatch(&app->capture, CAPTURE_EVENT_ERROR, NULL);
-            return;
-        }
-        if (app->transport.write(app->transport.context, app->tx, length)) {
-            app->samples_sent += (uint32_t)length;
-        }
-        /* One packet per poll bounds work independently of queue depth. */
-        return;
+        packet_accepted = queue_capture_packet(app);
+    } else {
+        packet_accepted = queue_control_reply(app);
     }
-    if (app->reply_length != 0 &&
-        app->transport.write(app->transport.context, app->reply, app->reply_length)) {
-        app->reply_length = 0;
-    }
+
+    return packet_accepted || (previous_state != app->capture.state);
 }

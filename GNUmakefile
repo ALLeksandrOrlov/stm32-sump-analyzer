@@ -6,13 +6,14 @@ CROSS_COMPILE ?= arm-none-eabi-
 ARM_CC := $(CROSS_COMPILE)gcc
 ARM_OBJCOPY := $(CROSS_COMPILE)objcopy
 ARM_SIZE := $(CROSS_COMPILE)size
+ARM_NM := $(CROSS_COMPILE)nm
 HOST_CC ?= cc
 COVERAGE_CC ?= gcc
 GCOV ?= gcov
 GCOVR ?= gcovr
 PYTHON ?= python3
 QEMU ?= qemu-system-arm
-CORE := core/sump_protocol.c core/capture.c core/analyzer_app.c
+CORE := core/sump_protocol.c core/capture_plan.c core/capture.c core/analyzer_app.c
 FREERTOS_DIR := third_party/FreeRTOS-Kernel
 FREERTOS_PORT := $(FREERTOS_DIR)/portable/GCC/ARM_CM4F
 FREERTOS_KERNEL := $(addprefix $(FREERTOS_DIR)/,tasks.c list.c queue.c stream_buffer.c) \
@@ -37,10 +38,15 @@ INCLUDES := -Icore -Iplatform/stm32 $(FREERTOS_INCLUDES) -IInc -I$(HAL_DIR)/Inc 
 CPU := -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=hard
 FW_CFLAGS := $(CPU) -std=c11 -Os -g3 -Wall -Wextra -fno-common \
  -ffunction-sections -fdata-sections -DUSE_HAL_DRIVER -DSTM32F407xx $(INCLUDES)
+OWNED_CFLAGS := -Werror -Wconversion -Wsign-conversion -Wshadow \
+ -Wstrict-prototypes -Wmissing-prototypes -Wvla -Walloca -fstack-usage
 FW_LDFLAGS := $(CPU) -TSTM32F407VGTx_FLASH.ld --specs=nano.specs \
  --specs=nosys.specs -Wl,--gc-sections,-Map=$(BUILD_DIR)/firmware/$(TARGET).map
 OBJECTS := $(addprefix $(BUILD_DIR)/firmware/,$(FIRMWARE:.c=.o)) \
  $(BUILD_DIR)/firmware/startup_stm32f407xx.o
+OWNED_SOURCES := $(CORE) $(wildcard platform/freertos/*.c) $(wildcard platform/stm32/*.c)
+OWNED_OBJECTS := $(addprefix $(BUILD_DIR)/firmware/,$(OWNED_SOURCES:.c=.o))
+$(OWNED_OBJECTS): FW_CFLAGS += $(OWNED_CFLAGS)
 HOST_FLAGS := -std=c11 -O1 -g -Wall -Wextra -Werror -pedantic -Icore
 SANITIZERS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
 TEST_SOURCES := tests/test_core.c $(CORE)
@@ -52,6 +58,7 @@ QEMU_RTOS_FLAGS := $(CPU) -std=c11 -Os -g -Wall -Wextra -Werror \
 .PHONY: all firmware test test-sanitize check-cubemx qemu-test clean docker-build docker-test
 all: firmware
 firmware: $(BUILD_DIR)/firmware/$(TARGET).elf $(BUILD_DIR)/firmware/$(TARGET).hex $(BUILD_DIR)/firmware/$(TARGET).bin
+	$(PYTHON) scripts/check_embedded.py elf --nm $(ARM_NM) $(BUILD_DIR)/firmware/$(TARGET).elf
 $(BUILD_DIR)/firmware/%.o: %.c GNUmakefile
 	@mkdir -p $(@D)
 	$(ARM_CC) $(FW_CFLAGS) -MMD -MP -c $< -o $@
@@ -76,6 +83,9 @@ test-sanitize: check-cubemx
 	$(BUILD_DIR)/tests/test_core_sanitize
 check-cubemx:
 	$(PYTHON) scripts/check_cubemx.py
+.PHONY: check-embedded
+check-embedded:
+	$(PYTHON) scripts/check_embedded.py static --build-dir $(BUILD_DIR)/embedded-checks
 $(BUILD_DIR)/qemu/test_core.elf: $(TEST_SOURCES) $(wildcard core/*.h) tests/qemu/startup.c tests/qemu/memory.ld GNUmakefile
 	@mkdir -p $(@D)
 	$(ARM_CC) $(QEMU_FLAGS) $(TEST_SOURCES) tests/qemu/startup.c -nostartfiles \
@@ -132,7 +142,8 @@ qemu-rtos-capture-test: $(BUILD_DIR)/qemu/test_runtime_capture.elf
 	 --machine stm32f407-sump-analyzer --success 'ALL RTOS CAPTURE TESTS PASSED'
 qemu-rtos-test: qemu-rtos-capture-test
 
-USB_PORT_TEST_SOURCES := tests/test_usb_cdc_port.c platform/stm32/usb_cdc_port.c
+USB_PORT_TEST_SOURCES := tests/test_usb_cdc_port.c platform/stm32/usb_cdc_port.c \
+ platform/stm32/usb_cdc_storage.c
 USB_PORT_TEST_INCLUDES := -Itests/stubs -Iplatform/stm32 -Iplatform/freertos \
  -I$(USB_DIR)/Core/Inc -I$(USB_DIR)/Class/CDC/Inc
 $(BUILD_DIR)/tests/test_usb_cdc_port: $(USB_PORT_TEST_SOURCES) $(wildcard tests/stubs/*.h) $(wildcard platform/stm32/*.h) GNUmakefile
@@ -168,7 +179,7 @@ coverage: check-cubemx
 	$(BUILD_DIR)/coverage/test_core
 	$(BUILD_DIR)/coverage/test_usb_cdc_port
 	$(GCOVR) --root . --gcov-executable '$(GCOV)' \
-	 --filter 'core/' --filter 'platform/stm32/usb_cdc_port.c' \
+	 --filter 'core/' --filter 'platform/stm32/usb_cdc_port.c' --filter 'platform/stm32/usb_cdc_storage.c' \
 	 --fail-under-line 95 --fail-under-branch 90 \
 	 --html-details $(BUILD_DIR)/coverage/coverage.html \
 	 --xml-pretty --xml $(BUILD_DIR)/coverage/coverage.xml \

@@ -23,7 +23,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
-#include "analyzer_runtime.h"
+#include "usb_cdc_port.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -63,10 +63,9 @@
   */
 
 /* USER CODE BEGIN PRIVATE_DEFINES */
-/* Define size for the receive and transmit buffer over CDC */
-/* It's up to user to redefine and/or remove those define */
-#define APP_RX_DATA_SIZE  64
-#define APP_TX_DATA_SIZE  64
+/* One full-speed endpoint packet; long streams live in task-owned storage. */
+#define APP_RX_DATA_SIZE CDC_DATA_FS_OUT_PACKET_SIZE
+#define APP_TX_DATA_SIZE CDC_DATA_FS_IN_PACKET_SIZE
 /* USER CODE END PRIVATE_DEFINES */
 
 /**
@@ -99,13 +98,6 @@ uint8_t UserRxBufferFS[APP_RX_DATA_SIZE];
 uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
-
-USBD_CDC_LineCodingTypeDef LineCoding = {
-    115200, /* baud rate */
-    0x00,   /* stop bits-1 */
-    0x00,   /* parity - none */
-    0x08    /* nb. of bits 8 */
-  };
 
 /* USER CODE END PRIVATE_VARIABLES */
 
@@ -162,10 +154,7 @@ USBD_CDC_ItfTypeDef USBD_Interface_fops_FS =
 static int8_t CDC_Init_FS(void)
 {
   /* USER CODE BEGIN 3 */
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, UserTxBufferFS, 0);
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
-  analyzer_runtime_usb_connected_from_isr();
-  return USBD_OK;
+  return (int8_t)usb_cdc_port_open_from_isr();
   /* USER CODE END 3 */
 }
 
@@ -176,8 +165,7 @@ static int8_t CDC_Init_FS(void)
 static int8_t CDC_DeInit_FS(void)
 {
   /* USER CODE BEGIN 4 */
-  analyzer_runtime_usb_disconnected_from_isr();
-  return USBD_OK;
+  return (int8_t)usb_cdc_port_close_from_isr();
   /* USER CODE END 4 */
 }
 
@@ -191,78 +179,7 @@ static int8_t CDC_DeInit_FS(void)
 static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 {
   /* USER CODE BEGIN 5 */
-  if ((cmd == CDC_SET_LINE_CODING || cmd == CDC_GET_LINE_CODING) && length < 7)
-    return USBD_FAIL;
-  switch(cmd)
-  {
-    case CDC_SEND_ENCAPSULATED_COMMAND:
-
-    break;
-
-    case CDC_GET_ENCAPSULATED_RESPONSE:
-
-    break;
-
-    case CDC_SET_COMM_FEATURE:
-
-    break;
-
-    case CDC_GET_COMM_FEATURE:
-
-    break;
-
-    case CDC_CLEAR_COMM_FEATURE:
-
-    break;
-
-  /*******************************************************************************/
-  /* Line Coding Structure                                                       */
-  /*-----------------------------------------------------------------------------*/
-  /* Offset | Field       | Size | Value  | Description                          */
-  /* 0      | dwDTERate   |   4  | Number |Data terminal rate, in bits per second*/
-  /* 4      | bCharFormat |   1  | Number | Stop bits                            */
-  /*                                        0 - 1 Stop bit                       */
-  /*                                        1 - 1.5 Stop bits                    */
-  /*                                        2 - 2 Stop bits                      */
-  /* 5      | bParityType |  1   | Number | Parity                               */
-  /*                                        0 - None                             */
-  /*                                        1 - Odd                              */
-  /*                                        2 - Even                             */
-  /*                                        3 - Mark                             */
-  /*                                        4 - Space                            */
-  /* 6      | bDataBits  |   1   | Number Data bits (5, 6, 7, 8 or 16).          */
-  /*******************************************************************************/
-    case CDC_SET_LINE_CODING:
-    	LineCoding.bitrate    = (uint32_t)(pbuf[0] | (pbuf[1] << 8) |\
-								 ((uint32_t)pbuf[2] << 16) | ((uint32_t)pbuf[3] << 24));
-		  LineCoding.format     = pbuf[4];
-		  LineCoding.paritytype = pbuf[5];
-		  LineCoding.datatype   = pbuf[6];
-		break;
-
-    case CDC_GET_LINE_CODING:
-		  pbuf[0] = (uint8_t)(LineCoding.bitrate);
-		  pbuf[1] = (uint8_t)(LineCoding.bitrate >> 8);
-		  pbuf[2] = (uint8_t)(LineCoding.bitrate >> 16);
-		  pbuf[3] = (uint8_t)(LineCoding.bitrate >> 24);
-		  pbuf[4] = LineCoding.format;
-		  pbuf[5] = LineCoding.paritytype;
-		  pbuf[6] = LineCoding.datatype;
-		break;
-
-    case CDC_SET_CONTROL_LINE_STATE:
-
-    break;
-
-    case CDC_SEND_BREAK:
-
-    break;
-
-  default:
-    break;
-  }
-
-  return (USBD_OK);
+  return (int8_t)usb_cdc_port_control_from_isr(cmd, pbuf, length);
   /* USER CODE END 5 */
 }
 
@@ -283,8 +200,7 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  analyzer_runtime_usb_receive_from_isr(Buf, *Len);
-  return USBD_OK;
+  return (int8_t)usb_cdc_port_receive_from_isr(Buf, *Len);
   /* USER CODE END 6 */
 }
 
@@ -303,11 +219,16 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
 {
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 7 */
-  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
-  if (hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED || hcdc == NULL)
+  /* Called by the TX task while usb_cdc_port_write excludes USB interrupts. */
+  USBD_CDC_HandleTypeDef *cdc = hUsbDeviceFS.pClassData;
+  if ((hUsbDeviceFS.dev_state != USBD_STATE_CONFIGURED) || (cdc == NULL) ||
+      (Buf == NULL) || (Len == 0U)) {
     return USBD_FAIL;
-  if (hcdc->TxState != 0) return USBD_BUSY;
-  USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
+  }
+  if (cdc->TxState != 0U) {
+    return USBD_BUSY;
+  }
+  (void)USBD_CDC_SetTxBuffer(&hUsbDeviceFS, Buf, Len);
   result = USBD_CDC_TransmitPacket(&hUsbDeviceFS);
   /* USER CODE END 7 */
   return result;

@@ -97,6 +97,7 @@ def run_checks(output):
     stages = [
         ("pipeline", [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py"], 30),
         ("cubemx", ["make", "check-cubemx"], 30),
+        ("embedded-c", ["make", "check-embedded"], 180),
         ("native", ["make", "test", "pulseview-fixture"], 120),
         ("sanitizers", ["make", "test-sanitize"], 120),
         ("coverage", ["make", "coverage"], 120),

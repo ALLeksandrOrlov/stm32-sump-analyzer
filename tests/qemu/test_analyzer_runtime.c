@@ -1,5 +1,11 @@
-/* Run the production USB runtime on the real Cortex-M4F scheduler. USB and
- * capture peripherals are controlled by a higher-priority stimulus task. */
+/**
+ * @file test_analyzer_runtime.c
+ * @brief Black-box scheduling and ownership tests for the production runtime.
+ *
+ * A higher-priority task drives real interrupts and delayed endpoint completions.
+ * The fixtures reject driver calls from ISR context and detect reuse of a USB
+ * buffer before its completion. All waits have a deadline.
+ */
 #include "analyzer_runtime.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -29,25 +35,34 @@ enum {
     IRQ_DISCONNECT = 2u,
     IRQ_RECEIVE = 4u,
     IRQ_TRANSMIT = 8u,
-    IRQ_CAPTURE = 16u
+    IRQ_CAPTURE = 16u,
+    IRQ_RESUME = 32u
 };
 
 typedef struct {
     uint8_t samples[1024];
     capture_plan_t plan;
     volatile capture_hw_event_t event;
-    unsigned starts, stops, polls;
+    unsigned starts;
+    unsigned stops;
+    unsigned polls;
 } capture_fake_t;
 
 typedef struct {
     bool out_credit;
     bool active;
+    bool suspended;
     const uint8_t *borrowed;
     uint8_t snapshot[64];
     size_t active_length;
     uint8_t wire[2048];
     size_t wire_length;
-    unsigned activations, attempts, accepted, rearms, idle_checks;
+    unsigned activations;
+    unsigned attempts;
+    unsigned accepted;
+    unsigned rearms;
+    unsigned rejected_rearms;
+    unsigned idle_checks;
     unsigned reject_writes;
 } usb_fake_t;
 
@@ -119,6 +134,9 @@ static bool usb_write(void *context, const uint8_t *bytes, size_t length)
     assert(interrupt_number() == 0);
     assert(length > 0 && length <= sizeof(fake->snapshot));
     ++fake->attempts;
+    if (fake->suspended) {
+        return false;
+    }
     if (fake->reject_writes) {
         --fake->reject_writes;
         return false;
@@ -151,29 +169,51 @@ static bool usb_idle(void *context)
     if (fake->active) {
         assert_active_bytes_unchanged();
     }
-    return !fake->active;
+    return !fake->active && !fake->suspended;
 }
 
-static void usb_rearm(void *context)
+static bool usb_rearm(void *context)
 {
     usb_fake_t *fake = context;
     assert(interrupt_number() == 0);
     assert(!fake->out_credit);
+    if (fake->suspended) {
+        ++fake->rejected_rearms;
+        return false;
+    }
     fake->out_credit = true;
     ++fake->rearms;
+    return true;
 }
 
 void ANALYZER_TEST_IRQHandler(void)
 {
     assert(interrupt_number() == 16);
-    unsigned starts = capture.starts, stops = capture.stops, polls = capture.polls;
-    unsigned attempts = usb.attempts, rearms = usb.rearms, idle_checks = usb.idle_checks;
+    unsigned starts = capture.starts;
+    unsigned stops = capture.stops;
+    unsigned polls = capture.polls;
+    unsigned attempts = usb.attempts;
+    unsigned rearms = usb.rearms;
+    unsigned idle_checks = usb.idle_checks;
     unsigned events = irq_events;
-    if (events & IRQ_DISCONNECT) analyzer_runtime_usb_disconnected_from_isr();
-    if (events & IRQ_CONNECT) analyzer_runtime_usb_connected_from_isr();
-    if (events & IRQ_RECEIVE) analyzer_runtime_usb_receive_from_isr(irq_bytes, irq_length);
-    if (events & IRQ_TRANSMIT) analyzer_runtime_usb_tx_complete_from_isr();
-    if (events & IRQ_CAPTURE) analyzer_runtime_capture_event_from_isr();
+    if ((events & IRQ_DISCONNECT) != 0u) {
+        analyzer_runtime_usb_disconnected_from_isr();
+    }
+    if ((events & IRQ_CONNECT) != 0u) {
+        analyzer_runtime_usb_connected_from_isr();
+    }
+    if ((events & IRQ_RECEIVE) != 0u) {
+        analyzer_runtime_usb_receive_from_isr(irq_bytes, irq_length);
+    }
+    if ((events & IRQ_TRANSMIT) != 0u) {
+        analyzer_runtime_usb_tx_complete_from_isr();
+    }
+    if ((events & IRQ_CAPTURE) != 0u) {
+        analyzer_runtime_capture_event_from_isr();
+    }
+    if ((events & IRQ_RESUME) != 0u) {
+        analyzer_runtime_usb_resumed_from_isr();
+    }
     /* The callbacks may copy input and wake tasks, but must not run protocol,
      * capture-driver operations, or task-only USB functions in interrupt context. */
     assert(capture.starts == starts && capture.stops == stops && capture.polls == polls);
@@ -187,7 +227,7 @@ static void interrupt(unsigned events)
     irq_events = events;
     NVIC_PEND_IRQ0 = 1;
     __asm volatile ("dsb\nisb" ::: "memory");
-    while (!irq_finished) {}
+    WAIT_UNTIL(irq_finished);
 }
 
 static void receive(const uint8_t *bytes, size_t length)
@@ -204,7 +244,7 @@ static void command(uint8_t opcode, uint32_t value)
 {
     uint8_t bytes[5] = {opcode, (uint8_t)value, (uint8_t)(value >> 8),
                         (uint8_t)(value >> 16), (uint8_t)(value >> 24)};
-    receive(bytes, opcode & 0x80 ? 5 : 1);
+    receive(bytes, (opcode & 0x80u) != 0u ? sizeof(bytes) : 1u);
 }
 
 static void complete_transmit(void)
@@ -224,6 +264,7 @@ static void session_reset(void)
     usb.active = false;
     usb.borrowed = NULL;
     usb.reject_writes = 0;
+    usb.suspended = false;
     usb.out_credit = true; /* CDC arms the first OUT packet during connection. */
     unsigned stops = capture.stops;
     interrupt(IRQ_DISCONNECT | IRQ_CONNECT);
@@ -335,7 +376,9 @@ static void test_reset_keeps_only_active_packet(void)
     complete_transmit();
     vTaskDelay(3);
     assert(!usb.active && usb.wire_length == 64);
-    for (size_t i = 0; i < 64; ++i) assert(usb.wire[i] == (uint8_t)(511 - i));
+    for (size_t i = 0u; i < 64u; ++i) {
+        assert(usb.wire[i] == (uint8_t)(511u - i));
+    }
     command(SUMP_ID, 0);
     WAIT_UNTIL(usb.active);
     complete_transmit();
@@ -423,6 +466,164 @@ static void test_receive_fault_preserves_active_transfer(void)
     }
 }
 
+
+static void test_bus_reset_releases_endpoint_and_partial_command(void)
+{
+    session_reset();
+    const uint8_t requests[] = {SUMP_ID, SUMP_ID, SUMP_DIVIDER, 0x55};
+    receive(requests, sizeof(requests));
+    WAIT_UNTIL(usb.active);
+    vTaskDelay(2);
+    unsigned previous_stops = capture.stops;
+
+    /* Reconfiguration may report Init without a separate DeInit callback. The
+     * adapter must first release the endpoint, including an unfinished IN. */
+    usb.active = false;
+    usb.borrowed = NULL;
+    usb.out_credit = true;
+    interrupt(IRQ_CONNECT);
+    WAIT_UNTIL(capture.stops > previous_stops);
+    vTaskDelay(2);
+    assert(!usb.active);
+
+    unsigned previous_starts = capture.starts;
+    command(SUMP_RUN, 0);
+    WAIT_UNTIL(capture.starts == previous_starts + 1u);
+    assert(capture.plan.config.samples == 1024);
+    assert(capture.plan.config.sample_period_ns == 1000);
+    command(SUMP_ID, 0);
+    drain(4);
+    assert(memcmp(usb.wire, "1ALS", 4) == 0);
+}
+
+static void test_reconnect_discards_packet_rejected_by_endpoint(void)
+{
+    session_reset();
+    unsigned previous_attempts = usb.attempts;
+    usb.reject_writes = 100;
+    command(SUMP_META, 0);
+    WAIT_UNTIL(usb.attempts > previous_attempts);
+    assert(!usb.active);
+
+    /* The TX task has dequeued a packet but owns no endpoint buffer yet. */
+    session_reset();
+    command(SUMP_ID, 0);
+    drain(4);
+    assert(memcmp(usb.wire, "1ALS", 4) == 0);
+}
+
+static void test_receive_overflow_invalidates_all_queued_commands(void)
+{
+    session_reset();
+    command(SUMP_ID, 0);
+    WAIT_UNTIL(usb.active);
+    unsigned previous_stops = capture.stops;
+    uint8_t requests[64];
+    memset(requests, SUMP_RUN, sizeof(requests));
+    unsigned previous_starts = capture.starts;
+
+    /* Deliberately violate OUT credit to exercise recovery from an adapter
+     * fault. Priority 4 keeps the application from draining between callbacks. */
+    for (unsigned packet = 0u; packet < 5u; ++packet) {
+        usb.out_credit = false;
+        irq_bytes = requests;
+        irq_length = sizeof(requests);
+        interrupt(IRQ_RECEIVE);
+    }
+    WAIT_UNTIL(capture.stops > previous_stops);
+    WAIT_UNTIL(usb.out_credit);
+    assert(capture.starts == previous_starts);
+    assert_active_bytes_unchanged();
+    complete_transmit();
+    command(SUMP_ID, 0);
+    drain(8);
+    assert(memcmp(usb.wire, "1ALS1ALS", 8) == 0);
+}
+
+static void test_disconnect_stops_capture_and_ignores_late_out(void)
+{
+    session_reset();
+    unsigned previous_starts = capture.starts;
+    command(SUMP_RUN, 0);
+    WAIT_UNTIL(capture.starts == previous_starts + 1u);
+    unsigned previous_stops = capture.stops;
+    usb.out_credit = false;
+    interrupt(IRQ_DISCONNECT);
+    WAIT_UNTIL(capture.stops > previous_stops);
+
+    const uint8_t request = SUMP_ID;
+    irq_bytes = &request;
+    irq_length = 1u;
+    interrupt(IRQ_RECEIVE | IRQ_TRANSMIT | IRQ_CAPTURE);
+    vTaskDelay(2);
+    assert(!usb.active);
+    assert(!usb.out_credit);
+    assert(capture.starts == previous_starts + 1u);
+
+    usb.out_credit = true;
+    interrupt(IRQ_CONNECT);
+    command(SUMP_ID, 0);
+    drain(4);
+    assert(memcmp(usb.wire, "1ALS", 4) == 0);
+}
+
+
+static void test_resume_retries_out_arm_without_resetting_partial_command(void)
+{
+    session_reset();
+    unsigned previous_rejections = usb.rejected_rearms;
+    unsigned previous_stops = capture.stops;
+    const uint8_t first[] = {SUMP_DIVIDER, 199u};
+
+    /* OUT completed just before suspension, but the application has not run
+     * yet. No new OUT can arrive until the failed rearm is retried on resume. */
+    usb.suspended = true;
+    receive(first, sizeof(first));
+    WAIT_UNTIL(usb.rejected_rearms > previous_rejections);
+    vTaskDelay(2);
+    assert(!usb.out_credit);
+    assert(capture.stops == previous_stops);
+
+    usb.suspended = false;
+    interrupt(IRQ_RESUME);
+    WAIT_UNTIL(usb.out_credit);
+    const uint8_t last[] = {0u, 0u, 0u, SUMP_RUN};
+    unsigned previous_starts = capture.starts;
+    receive(last, sizeof(last));
+    WAIT_UNTIL(capture.starts == previous_starts + 1u);
+    assert(capture.plan.config.sample_period_ns == 2000u);
+    assert(capture.stops == previous_stops);
+}
+
+static void test_resume_releases_completed_in_and_preserves_queued_reply(void)
+{
+    session_reset();
+    const uint8_t requests[] = {SUMP_ID, SUMP_META};
+    receive(requests, sizeof(requests));
+    WAIT_UNTIL(usb.active);
+    vTaskDelay(2);
+    assert(usb.active_length == 4u);
+    unsigned previous_idle_checks = usb.idle_checks;
+
+    /* The completion notification and suspend can precede the TX task. Its
+     * idle check remains false while suspended, even though IN has completed. */
+    usb.suspended = true;
+    complete_transmit();
+    WAIT_UNTIL(usb.idle_checks > previous_idle_checks);
+    vTaskDelay(2);
+    assert(!usb.active);
+    assert(usb.wire_length == 4u);
+
+    usb.suspended = false;
+    interrupt(IRQ_RESUME);
+    WAIT_UNTIL(usb.active);
+    assert(usb.active_length > 4u && usb.snapshot[0] == 1u);
+    complete_transmit();
+    vTaskDelay(2);
+    assert(!usb.active);
+    assert(memcmp(usb.wire, "1ALS", 4u) == 0);
+}
+
 static void stimulus(void *argument)
 {
     (void)argument;
@@ -439,6 +640,12 @@ static void stimulus(void *argument)
     test_reconnect_drops_stale_session();
     test_write_retry_and_order();
     test_receive_fault_preserves_active_transfer();
+    test_bus_reset_releases_endpoint_and_partial_command();
+    test_reconnect_discards_packet_rejected_by_endpoint();
+    test_receive_overflow_invalidates_all_queued_commands();
+    test_disconnect_stops_capture_and_ignores_late_out();
+    test_resume_retries_out_arm_without_resetting_partial_command();
+    test_resume_releases_completed_in_and_preserves_queued_reply();
     assert(usb.activations == 1);
     puts("ALL RTOS USB TESTS PASSED");
     exit(0);
@@ -452,7 +659,15 @@ int main(void)
         .context = &usb, .write = usb_write, .idle = usb_idle,
         .rearm = usb_rearm, .activate = usb_activate
     };
+    analyzer_usb_port_t invalid_port = port;
+    invalid_port.write = NULL;
+    assert(!analyzer_runtime_init(driver, invalid_port, 168000000));
+    assert(!analyzer_runtime_init(driver, port, 0));
+    capture_driver_t invalid_driver = driver;
+    invalid_driver.poll = NULL;
+    assert(!analyzer_runtime_init(invalid_driver, port, 168000000));
     assert(analyzer_runtime_init(driver, port, 168000000));
+    assert(!analyzer_runtime_init(driver, port, 168000000));
     /* Match HAL_Init's NVIC_PRIORITYGROUP_4. An early FromISR call would fail
      * the port's assertion before xPortStartScheduler initializes its limits. */
     SCB_PRIORITY_GROUPING = 0x05fa0000u | (3u << 8);

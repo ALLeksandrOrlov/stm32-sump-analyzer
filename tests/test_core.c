@@ -1,3 +1,4 @@
+/** @file test_core.c @brief Observable protocol, capture, and transport contracts. */
 #include "analyzer_app.h"
 
 #include <assert.h>
@@ -147,7 +148,7 @@ static void drain_transfers(void)
             return;
         }
     }
-    assert(!"drain timed out");
+    assert(false && "drain timed out");
 }
 
 static void test_parser_preserves_framing_across_packet_boundaries(void)
@@ -436,7 +437,7 @@ static void test_plan_validation_boundaries(void)
     for (unsigned pin = 0; pin < 8; ++pin) {
         config.trigger_mask = (uint8_t)(1u << pin);
         assert(capture_make_plan(&config, 168000000, &plan));
-        config.trigger_value = config.trigger_mask;
+        config.trigger_value = (uint8_t)config.trigger_mask;
         assert(capture_make_plan(&config, 168000000, &plan));
     }
     const uint8_t multiple_channels[] = {0x03, 0x81, 0xff};
@@ -739,6 +740,39 @@ static void test_full_queue_backpressures_control_commands_until_reply_is_accept
     }
 }
 
+static void test_reset_cancels_pending_reply_without_reading_capture(void)
+{
+    const uint8_t requests[] = {SUMP_ID, SUMP_META};
+    for (size_t request = 0U; request < sizeof(requests); ++request) {
+        reset_fixture();
+        app.config.samples = 512U;
+        app.config.post_trigger = 512U;
+        memset(fixture.data, 0x5a, app.config.samples);
+        send_command(SUMP_RUN, 0U);
+        fixture.event = CAPTURE_HW_COMPLETE;
+        for (unsigned packet = 0U; packet < TRANSPORT_QUEUE_PACKETS; ++packet) {
+            analyzer_app_poll(&app);
+        }
+        assert(app.capture.state == CAPTURE_SENDING && fixture.busy);
+        send_command(requests[request], 0U);
+        analyzer_app_poll(&app);
+        assert(app.reply_length != 0U);
+        assert(!analyzer_app_receive(&app, SUMP_ID));
+
+        /* The host may stop consuming IN before sending cancellation. */
+        assert(analyzer_app_receive(&app, SUMP_RESET));
+        assert(app.capture.state == CAPTURE_IDLE && app.reply_length == 0U);
+        assert(fixture.cancellations == 1U && fixture.queue_count == 1U);
+        assert(fixture.busy);
+        assert(fixture.packets[fixture.queue_head].length == ANALYZER_TRANSFER_BYTES);
+        complete_transfer();
+        assert(transport_idle(&fixture));
+        assert(fixture.wire_length == ANALYZER_TRANSFER_BYTES);
+        analyzer_app_poll(&app);
+        assert(transport_idle(&fixture));
+    }
+}
+
 static void test_reset_discards_queued_samples_but_preserves_active_packet(void)
 {
     reset_fixture();
@@ -885,6 +919,204 @@ static void test_hardware_events_are_polled_only_during_capture(void)
     assert(app.capture.state == CAPTURE_RUNNING);
 }
 
+static void test_configuration_changes_only_after_the_complete_frame(void)
+{
+    const uint8_t count_frame[] = {SUMP_COUNTS, 0x02, 0x00, 0x01, 0x00};
+
+    /* USB may pause at any byte boundary, including between opcode and value. */
+    for (size_t pause_at = 0U; pause_at < sizeof(count_frame); ++pause_at) {
+        reset_fixture();
+        for (size_t byte = 0U; byte < sizeof(count_frame); ++byte) {
+            if (byte == pause_at) {
+                for (unsigned poll = 0U; poll < 5U; ++poll) {
+                    assert(!analyzer_app_poll(&app));
+                }
+            }
+            assert(analyzer_app_receive(&app, count_frame[byte]));
+            if ((byte + 1U) < sizeof(count_frame)) {
+                assert(app.config.samples == 1024U);
+                assert(app.config.post_trigger == 1024U);
+                assert(fixture.starts == 0U && fixture.cancellations == 0U);
+            }
+        }
+        send_command(SUMP_RUN, 0U);
+        assert(fixture.plan.config.samples == 12U);
+        assert(fixture.plan.config.post_trigger == 8U);
+        assert(fixture.starts == 1U);
+    }
+}
+
+static void test_reset_discards_every_possible_partial_argument(void)
+{
+    for (unsigned argument_bytes = 0U; argument_bytes < SUMP_ARGUMENT_BYTES;
+         ++argument_bytes) {
+        reset_fixture();
+        assert(analyzer_app_receive(&app, SUMP_COUNTS));
+        for (unsigned byte = 0U; byte < argument_bytes; ++byte) {
+            assert(analyzer_app_receive(&app, 0xffU));
+        }
+        analyzer_app_reset(&app);
+        send_command(SUMP_ID, 0U);
+        drain_transfers();
+        assert(fixture.wire_length == 4U);
+        assert(memcmp(fixture.wire, "1ALS", 4U) == 0);
+        assert(fixture.cancellations == 1U);
+    }
+}
+
+static void test_all_insufficient_metadata_capacities_preserve_storage(void)
+{
+    uint8_t expected[SUMP_METADATA_MAX_BYTES];
+    uint8_t actual[SUMP_METADATA_MAX_BYTES];
+    const size_t length = sump_metadata(expected, sizeof(expected),
+                                        UINT32_C(0x12345678), UINT32_C(0x89abcdef));
+    const uint8_t expected_tail[] = {
+        0x23, 0x89, 0xab, 0xcd, 0xef,
+        0x21, 0x12, 0x34, 0x56, 0x78,
+        0x40, 8, 0x41, 2, 0
+    };
+
+    assert(length >= sizeof(expected_tail));
+    assert(memcmp(&expected[length - sizeof(expected_tail)], expected_tail,
+                  sizeof(expected_tail)) == 0);
+
+    for (size_t capacity = 0U; capacity < length; ++capacity) {
+        memset(actual, 0xa5, sizeof(actual));
+        assert(sump_metadata(actual, capacity, 0U, UINT32_MAX) == 0U);
+        for (size_t byte = 0U; byte < sizeof(actual); ++byte) {
+            assert(actual[byte] == 0xa5U);
+        }
+    }
+}
+
+static void test_capture_event_state_matrix(void)
+{
+    /* The matrix is the public capture lifecycle, independent of its dispatcher. */
+    static const capture_state_t states[] = {
+        CAPTURE_IDLE, CAPTURE_ARMED, CAPTURE_RUNNING, CAPTURE_SENDING, CAPTURE_ERROR
+    };
+    static const capture_event_t events[] = {
+        CAPTURE_EVENT_RUN, CAPTURE_EVENT_RESET, CAPTURE_EVENT_TRIGGER,
+        CAPTURE_EVENT_COMPLETE, CAPTURE_EVENT_SENT, CAPTURE_EVENT_ERROR
+    };
+    static const bool accepted[][6] = {
+        {true,  true, false, false, false, true},
+        {false, true, true,  true,  false, true},
+        {false, true, false, true,  false, true},
+        {false, true, false, false, true,  true},
+        {false, true, false, false, false, true}
+    };
+    static const capture_state_t destinations[] = {
+        CAPTURE_RUNNING, CAPTURE_IDLE, CAPTURE_RUNNING,
+        CAPTURE_SENDING, CAPTURE_IDLE, CAPTURE_ERROR
+    };
+
+    for (size_t state = 0U; state < (sizeof(states) / sizeof(states[0])); ++state) {
+        for (size_t event = 0U; event < (sizeof(events) / sizeof(events[0])); ++event) {
+            reset_fixture();
+            app.capture.state = states[state];
+            assert(capture_dispatch(&app.capture, events[event], &app.config) ==
+                   accepted[state][event]);
+            assert(app.capture.state ==
+                   (accepted[state][event] ? destinations[event] : states[state]));
+            assert(fixture.starts ==
+                   ((events[event] == CAPTURE_EVENT_RUN && accepted[state][event]) ? 1U : 0U));
+            assert(fixture.stops ==
+                   ((events[event] == CAPTURE_EVENT_RESET || events[event] == CAPTURE_EVENT_ERROR)
+                    ? 1U : 0U));
+            assert(fixture.polls == 0U && fixture.write_attempts == 0U);
+        }
+    }
+}
+
+static void test_invalid_hardware_event_stops_capture(void)
+{
+    reset_fixture();
+    send_command(SUMP_RUN, 0U);
+    fixture.event = (capture_hw_event_t)99;
+    assert(analyzer_app_poll(&app));
+    assert(app.capture.state == CAPTURE_ERROR);
+    assert(fixture.stops == 1U);
+    assert(!analyzer_app_poll(&app));
+    assert(fixture.polls == 1U);
+}
+
+static void test_poll_reports_only_state_or_output_progress(void)
+{
+    reset_fixture();
+    assert(!analyzer_app_poll(&app));
+    send_command(SUMP_ID, 0U);
+    fixture.reject = true;
+    assert(!analyzer_app_poll(&app));
+    fixture.reject = false;
+    assert(analyzer_app_poll(&app));
+    assert(!analyzer_app_poll(&app));
+    complete_transfer();
+
+    send_command(SUMP_COUNTS, 0U);
+    send_command(SUMP_TRIGGER_MASK, 1U);
+    send_command(SUMP_RUN, 0U);
+    assert(!analyzer_app_poll(&app));
+    fixture.event = CAPTURE_HW_TRIGGERED;
+    assert(analyzer_app_poll(&app));
+    assert(!analyzer_app_poll(&app));
+
+    fixture.event = CAPTURE_HW_COMPLETE;
+    fixture.reject = true;
+    assert(analyzer_app_poll(&app)); /* Transition is progress even without queue space. */
+    assert(!analyzer_app_poll(&app));
+    assert(app.samples_sent == 0U);
+    fixture.reject = false;
+    assert(analyzer_app_poll(&app));
+    assert(app.samples_sent == 4U);
+    assert(!analyzer_app_poll(&app)); /* The final packet still belongs to USB. */
+    complete_transfer();
+    assert(analyzer_app_poll(&app));
+    assert(app.capture.state == CAPTURE_IDLE);
+    assert(!analyzer_app_poll(&app));
+}
+
+static void test_reverse_reader_all_ring_positions_and_short_destinations(void)
+{
+    static const size_t capacities[] = {1U, 2U, 7U, 9U};
+    const uint32_t sample_count = 7U;
+
+    reset_fixture();
+    app.config.samples = sample_count;
+    app.config.post_trigger = sample_count;
+    for (uint32_t sample = 0U; sample < sample_count; ++sample) {
+        fixture.data[sample] = (uint8_t)(10U + sample);
+    }
+    send_command(SUMP_RUN, 0U);
+    assert(capture_dispatch(&app.capture, CAPTURE_EVENT_COMPLETE, NULL));
+
+    for (uint32_t next = 0U; next <= sample_count; ++next) {
+        fixture.next = next;
+        for (uint32_t offset = 0U; offset < sample_count; ++offset) {
+            for (size_t capacity = 0U; capacity < (sizeof(capacities) / sizeof(capacities[0]));
+                 ++capacity) {
+                uint8_t output[9];
+                size_t expected_length = sample_count - offset;
+
+                if (expected_length > capacities[capacity]) {
+                    expected_length = capacities[capacity];
+                }
+                memset(output, 0xa5, sizeof(output));
+                assert(capture_read_reverse(&app.capture, offset, output,
+                                            capacities[capacity]) == expected_length);
+                for (size_t sample = 0U; sample < expected_length; ++sample) {
+                    const size_t index = (next + sample_count - 1U - offset - sample +
+                                          sample_count) % sample_count;
+                    assert(output[sample] == fixture.data[index]);
+                }
+                for (size_t byte = expected_length; byte < sizeof(output); ++byte) {
+                    assert(output[byte] == 0xa5U);
+                }
+            }
+        }
+    }
+}
+
 int main(void)
 {
     test_parser_preserves_framing_across_packet_boundaries();
@@ -908,6 +1140,7 @@ int main(void)
     test_capture_uses_queue_capacity_and_retries_without_skipping_samples();
     test_capture_waits_for_queued_packets_even_without_active_hardware();
     test_full_queue_backpressures_control_commands_until_reply_is_accepted();
+    test_reset_cancels_pending_reply_without_reading_capture();
     test_reset_discards_queued_samples_but_preserves_active_packet();
     test_reset_discards_every_packet_when_transmitter_has_not_started();
     test_invalid_capture_buffer_stops_without_transmitting();
@@ -917,6 +1150,13 @@ int main(void)
     test_reset_allows_new_capture_with_previous_transfer_in_flight();
     test_capture_events_obey_state_guards();
     test_hardware_events_are_polled_only_during_capture();
+    test_configuration_changes_only_after_the_complete_frame();
+    test_reset_discards_every_possible_partial_argument();
+    test_all_insufficient_metadata_capacities_preserve_storage();
+    test_capture_event_state_matrix();
+    test_invalid_hardware_event_stops_capture();
+    test_poll_reports_only_state_or_output_progress();
+    test_reverse_reader_all_ring_positions_and_short_destinations();
     puts("ALL CORE TESTS PASSED");
     return 0;
 }

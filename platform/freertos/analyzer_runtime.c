@@ -4,15 +4,29 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* The application owns parser, capture state and command processing. The USB
- * task owns transmission. Their stacks and queues never use the heap. */
-static analyzer_app_t app;
+/** Bytes retained when response backpressure pauses parsing mid-packet. */
+typedef struct {
+    usb_rx_message_t packet;
+    size_t length;
+    size_t next_byte;
+} pending_input_t;
+
+enum {
+    APPLICATION_STACK_WORDS = 768,
+    TRANSMITTER_STACK_WORDS = 512,
+    APPLICATION_PRIORITY = 2,
+    TRANSMITTER_PRIORITY = 3
+};
+
+static analyzer_app_t application;
 static uint32_t application_session;
-enum { APPLICATION_STACK_WORDS = 768, TRANSMITTER_STACK_WORDS = 512 };
-static StaticTask_t application_control, transmitter_control;
+static bool initialized;
+static StaticTask_t application_control;
+static StaticTask_t transmitter_control;
 static StackType_t application_stack[APPLICATION_STACK_WORDS];
 static StackType_t transmitter_stack[TRANSMITTER_STACK_WORDS];
-_Static_assert(ANALYZER_TRANSFER_BYTES <= USB_MESSAGE_BYTES, "USB queue must fit an application packet");
+_Static_assert(ANALYZER_TRANSFER_BYTES <= USB_MESSAGE_BYTES,
+               "One application packet must fit the USB mailbox");
 
 static bool enqueue_output(void *context, const uint8_t *bytes, size_t length)
 {
@@ -32,56 +46,80 @@ static void cancel_output(void *context)
     usb_messages_cancel();
 }
 
+static bool reconcile_session(pending_input_t *input)
+{
+    uint32_t current_session = usb_messages_session();
+    if (application_session == current_session) {
+        return false;
+    }
+
+    analyzer_app_reset(&application);
+    application_session = current_session;
+    input->length = 0u;
+    input->next_byte = 0u;
+    return true;
+}
+
+static bool receive_packet(pending_input_t *input)
+{
+    if (input->length != 0u) {
+        return false;
+    }
+    input->length = usb_messages_receive(&input->packet);
+    input->next_byte = 0u;
+    if (input->length == 0u) {
+        return false;
+    }
+    if (input->packet.session != application_session) {
+        input->length = 0u;
+    }
+    return true;
+}
+
+static bool process_input(pending_input_t *input)
+{
+    bool progressed = false;
+
+    /* At most one full-speed packet is examined per pass. A rejected byte
+     * remains pending until output space is available; no command is lost. */
+    while ((input->next_byte < input->length) &&
+           (application_session == usb_messages_session())) {
+        if (!analyzer_app_receive(&application,
+                                  input->packet.bytes[input->next_byte])) {
+            break;
+        }
+        ++input->next_byte;
+        progressed = true;
+    }
+    if (input->next_byte == input->length) {
+        input->length = 0u;
+        input->next_byte = 0u;
+    }
+    return progressed;
+}
+
 static void application_task(void *argument)
 {
+    pending_input_t input = {0};
     (void)argument;
-    usb_rx_message_t received;
-    size_t length = 0, offset = 0;
+
     for (;;) {
-        bool progress = false;
-        uint32_t session = usb_messages_session();
-        if (application_session != session) {
-            analyzer_app_reset(&app);
-            application_session = session;
-            length = offset = 0;
-            progress = true;
-        }
-        if (length == 0) {
-            length = usb_messages_receive(&received);
-            offset = 0;
-            if (length) {
-                progress = true;
-                if (received.session != application_session) {
-                    length = 0;
-                }
-            }
-        }
+        bool progressed = reconcile_session(&input);
+        progressed = receive_packet(&input) || progressed;
         usb_messages_rearm();
-        while (offset < length && application_session == usb_messages_session()) {
-            if (!analyzer_app_receive(&app, received.bytes[offset])) {
-                break;
-            }
-            ++offset;
-            progress = true;
-        }
-        if (offset == length) {
-            length = offset = 0;
-        }
-        /* A USB reset may interrupt command execution. Reconcile it before
-         * producing any output; the transport also checks the session atomically. */
+        progressed = process_input(&input) || progressed;
+
+        /* A reset can preempt a command. Reconcile it before producing output;
+         * the TX mailbox also checks the originating session atomically. */
         if (application_session != usb_messages_session()) {
             continue;
         }
-        capture_state_t state = app.capture.state;
-        uint32_t samples = app.samples_sent;
-        size_t reply = app.reply_length;
-        analyzer_app_poll(&app);
-        progress |= state != app.capture.state || samples != app.samples_sent || reply != app.reply_length;
-        if (!progress) {
-            /* Notifications use index 1; message buffers reserve index 0.
-             * An event arriving before this wait remains pending, so no wakeup
-             * can be lost between inspecting state and blocking the task. */
-            ulTaskNotifyTakeIndexed(ANALYZER_NOTIFICATION_INDEX, pdTRUE, portMAX_DELAY);
+        progressed = analyzer_app_poll(&application) || progressed;
+        if (!progressed) {
+            /* Notifications stay pending across the condition-to-wait gap.
+             * Index zero belongs to the FreeRTOS message-buffer mechanism. */
+            (void)ulTaskNotifyTakeIndexed(ANALYZER_NOTIFICATION_INDEX, pdTRUE,
+                                          portMAX_DELAY);
         }
     }
 }
@@ -89,18 +127,34 @@ static void application_task(void *argument)
 bool analyzer_runtime_init(capture_driver_t capture, analyzer_usb_port_t usb,
                            uint32_t timer_clock_hz)
 {
-    usb_messages_init(usb);
-    analyzer_app_init(&app, capture, (analyzer_transport_t){
-        .context = NULL, .write = enqueue_output, .idle = output_idle, .cancel = cancel_output
-    }, timer_clock_hz);
-    TaskHandle_t application = xTaskCreateStatic(application_task, "analyzer", APPLICATION_STACK_WORDS, NULL, 2,
-                                                application_stack, &application_control);
-    TaskHandle_t transmitter = xTaskCreateStatic(usb_messages_tx_task, "usb-tx", TRANSMITTER_STACK_WORDS, NULL, 3,
-                                                transmitter_stack, &transmitter_control);
-    if (!application || !transmitter) {
+    TaskHandle_t application_handle;
+    TaskHandle_t transmitter_handle;
+    analyzer_transport_t output = {
+        .context = NULL,
+        .write = enqueue_output,
+        .idle = output_idle,
+        .cancel = cancel_output
+    };
+
+    if (initialized || (timer_clock_hz == 0u) || (usb.activate == NULL) ||
+        (usb.write == NULL) || (usb.idle == NULL) || (usb.rearm == NULL) ||
+        (capture.start == NULL) || (capture.stop == NULL) ||
+        (capture.poll == NULL) || (capture.buffer == NULL)) {
         return false;
     }
-    usb_messages_bind_tasks(application, transmitter);
+    initialized = true;
+    usb_messages_init(usb);
+    analyzer_app_init(&application, capture, output, timer_clock_hz);
+    application_handle = xTaskCreateStatic(
+        application_task, "analyzer", APPLICATION_STACK_WORDS, NULL,
+        APPLICATION_PRIORITY, application_stack, &application_control);
+    transmitter_handle = xTaskCreateStatic(
+        usb_messages_tx_task, "usb-tx", TRANSMITTER_STACK_WORDS, NULL,
+        TRANSMITTER_PRIORITY, transmitter_stack, &transmitter_control);
+    if ((application_handle == NULL) || (transmitter_handle == NULL)) {
+        return false;
+    }
+    usb_messages_bind_tasks(application_handle, transmitter_handle);
     return true;
 }
 
